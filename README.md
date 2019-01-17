@@ -1,6 +1,22 @@
 Distance/Occlusion Library + Tool
 ===============
 
+<a href="data/tiger.png"            ><img src="data/tiger.png"             width="192"/></a>
+<a href="images/tiger-sdf.png"      ><img src="images/tiger-sdf.png"       width="192"/></a>
+<a href="images/tiger-sdf-rg.png"   ><img src="images/tiger-sdf-rg.png"    width="192"/></a>
+<a href="images/tiger-sdf-delta.png"><img src="images/tiger-sdf-delta.png" width="192"/></a>
+
+<a href="data/kiwi.png"             ><img src="data/kiwi.png"              width="192"/></a>
+<a href="images/kiwi-sdf.png"       ><img src="images/kiwi-sdf.png"        width="192"/></a>
+<a href="images/kiwi-sdf-rg.png"    ><img src="images/kiwi-sdf-rg.png"     width="192"/></a>
+<a href="images/kiwi-sdf-delta.png" ><img src="images/kiwi-sdf-delta.png"  width="192"/></a>
+
+From left to right: original, signed distance with zero at 0.5,
+red/green SDF, delta vectors to closest boundary point.
+
+Intro
+-----
+
 The DistanceOcclusionLib.* files here implement a number of algorithms for
 
 * Distance field generation
@@ -79,20 +95,3 @@ E.g.,
 
 On Windows just include these files in your visual studio project. The code has
 been tested under clang, gcc, and Visual C.
-
-
-Examples
---------
-
-From left to right: original, signed distance with zero at 0.5,
-red/green SDF, delta vectors to closest boundary point.
-
-<a href="data/tiger.png"            ><img src="data/tiger.png"             width="192"/></a>
-<a href="images/tiger-sdf.png"      ><img src="images/tiger-sdf.png"       width="192"/></a>
-<a href="images/tiger-sdf-rg.png"   ><img src="images/tiger-sdf-rg.png"    width="192"/></a>
-<a href="images/tiger-sdf-delta.png"><img src="images/tiger-sdf-delta.png" width="192"/></a>
-
-<a href="data/kiwi.png"             ><img src="data/kiwi.png"              width="192"/></a>
-<a href="images/kiwi-sdf.png"       ><img src="images/kiwi-sdf.png"        width="192"/></a>
-<a href="images/kiwi-sdf-rg.png"    ><img src="images/kiwi-sdf-rg.png"     width="192"/></a>
-<a href="images/kiwi-sdf-delta.png" ><img src="images/kiwi-sdf-delta.png"  width="192"/></a>
