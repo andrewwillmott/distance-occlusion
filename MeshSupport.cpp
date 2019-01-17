@@ -83,15 +83,16 @@ Bounds3f MSL::FindAOBounds(float eps, Bounds3f modelBounds, Vec3f minArea, Vec3f
 
 namespace MSL
 {
-    inline Vec3f  operator- (Vec3f  a, Vec3f b) { return { a.x - b.x, a.y - b.y, a.z - b.z }; }
-    inline Vec3f  operator+ (Vec3f  a, Vec3f b) { return { a.x + b.x, a.y + b.y, a.z + b.z }; }
-    inline Vec3f  operator* (Vec3f  a, Vec3f b) { return { a.x * b.x, a.y * b.y, a.z * b.z }; }
-    inline Vec3f  operator/ (Vec3f  a, Vec3f b) { return { a.x / b.x, a.y / b.y, a.z / b.z }; }
+    inline Vec3f  operator+ (Vec3f  a, Vec3f b) { Vec3f v = { a.x + b.x, a.y + b.y, a.z + b.z }; return v; }
+    inline Vec3f  operator- (Vec3f  a, Vec3f b) { Vec3f v = { a.x - b.x, a.y - b.y, a.z - b.z }; return v; }
+    inline Vec3f  operator* (Vec3f  a, Vec3f b) { Vec3f v = { a.x * b.x, a.y * b.y, a.z * b.z }; return v; }
+    inline Vec3f  operator/ (Vec3f  a, Vec3f b) { Vec3f v = { a.x / b.x, a.y / b.y, a.z / b.z }; return v; }
+    inline Vec3f  operator* (Vec3f  a, float s) { Vec3f v = { a.x * s,   a.y * s,   a.z * s   }; return v; }
     inline Vec3f& operator+=(Vec3f& a, Vec3f b) { a.x += b.x; a.y += b.y; a.z += b.z; return a; }
     inline Vec3f& operator-=(Vec3f& a, Vec3f b) { a.x -= b.x; a.y -= b.y; a.z -= b.z; return a; }
 
     inline float dot(Vec3f a, Vec3f b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
-    inline Vec3f abs(Vec3f v)          { return { fabsf(v.x), fabsf(v.y), fabsf(v.z) }; }
+    inline Vec3f abs(Vec3f v)          { Vec3f r = { fabsf(v.x), fabsf(v.y), fabsf(v.z) }; return r; }
     inline float len(Vec3f v)          { return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z); }
 
     template <typename T> inline void swap(T& a, T& b) { T t(a); a = b; b = t; }
@@ -108,22 +109,24 @@ namespace MSL
 
     inline Vec3f MinElts(const Vec3f& a, const Vec3f& b)
     {
-        return Vec3f
+        Vec3f result =
         {
             Min(a.x, b.x),
             Min(a.y, b.y),
             Min(a.z, b.z)
         };
+        return result;
     }
 
     inline Vec3f MaxElts(const Vec3f& a, const Vec3f& b)
     {
-        return Vec3f
+        Vec3f result =
         {
             Max(a.x, b.x),
             Max(a.y, b.y),
             Max(a.z, b.z)
         };
+        return result;
     }
 
     inline int FloorToInt32(float x)
@@ -382,7 +385,7 @@ void MSL::CreateBitMaskFromTriangles
     Vec3f cellW    = (bbox.mMax - bbox.mMin) / whd;
     Vec3f cellInvW = whd / (bbox.mMax - bbox.mMin);
 
-    Vec3f hw = cellW * Vec3f{0.500001f, 0.500001f, 0.500001f};
+    Vec3f hw = cellW * 0.500001f;
 
     for (int iv = 0; iv < triCount * 3; iv += 3)
     {
@@ -491,7 +494,7 @@ void MSL::CreateDirW8FromTriangles
     Vec3f cellW    = (bbox.mMax - bbox.mMin) / whd;
     Vec3f cellInvW = whd / (bbox.mMax - bbox.mMin);
 
-    Vec3f hw = cellW * Vec3f{0.500001f, 0.500001f, 0.500001f};
+    Vec3f hw = cellW * 0.500001f;
 
     for (int iv = 0; iv < triCount * 3; iv += 3)
     {
