@@ -5,54 +5,97 @@
 
 #include "DistanceOcclusionLib.h"
 
-#include <assert.h>
-#include <float.h>
 #include <math.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 using namespace DOL;
 
-// Declarations
+#if defined(DOS_DEBUG) || defined(DEBUG)
+    #include <assert.h>
+#else
+    #define assert(e) ((void) 0)
+#endif
 
+#if !defined(__cplusplus) || (__cplusplus <= 201100)
+    #define constexpr const
+#endif
+
+// Declarations
 
 namespace
 {
-    // To get the full INT16_MAX range, Closer() needs to
-    // use int64_t for its partial results in the Closer(x, y, z) case.
-    // We just limit the max to avoid this.
-    const int16_t kMaxDelta2 = INT16_MAX;
-    const int16_t kMaxDelta3 = 25000;
-
-    inline uint32_t NextSeed(uint32_t seed)
+    inline int RNG(uint32_t& seed, int limit)
     {
-        return seed * 0x278dde6d;
+        seed = uint32_t(seed * uint64_t(1103515245)) + 12345;
+        return int((seed * (uint64_t(limit))) >> 32);
     }
 }
+
+// Convenience macro for iterating over set bits (and also testing different strategies)
+#ifdef _MSC_VER
+    #include <intrin.h>
+    uint32_t TrailingZeroes32(uint32_t mask)
+    {
+        unsigned long index;
+        _BitScanForward(&index, mask);
+        return index;
+    }
+#elif defined(__GNUC__)
+    #define TrailingZeroes32 __builtin_ctz
+#else
+    int TrailingZeroes32(uint32_t x)
+    {
+    }
+#endif
+
+#define ITER_SET_BITS_BEGIN(MASK)           \
+    while (MASK)                            \
+    {                                       \
+        int i = TrailingZeroes32(MASK);     \
+        MASK &= MASK - 1;                   \
+                                            \
+        if (j * 32 + i >= w)                \
+            break;                          \
+
+#define ITER_SET_BITS_BEGIN_BF(MASK)        \
+    for (int i = 0; i < 32; i++)            \
+        if (MASK & (1 << i))                \
+        {                                   \
+            if (j * 32 + i >= w)            \
+                break;                      \
+
+#define ITER_SET_BITS_END }
+
+
 
 
 // --- 2D Images ---------------------------------------------------------------
 
-void DOL::CreateBitMask(int w, int h, uint32_t seed, uint32_t mask[])
+uint32_t* DOL::CreateBitMask(int w, int h)
 {
-    int scale = (seed >> 4);
-    seed &= 15;
+    size_t maskSize = MaskSize(w, h);
+    uint32_t* mask = new uint32_t[maskSize];
+
+    memset(mask, 0, maskSize * sizeof(uint32_t));
     
-    int count = (w + h) * (1 + scale) / 8;
+    return mask;
+}
+
+void DOL::DestroyBitMask(uint32_t*& mask)
+{
+    delete[] mask;
+    mask = 0;
+}
+
+void DOL::BitMaskAddPoints(int w, int h, int count, uint32_t seed, uint32_t mask[])
+{
     int ws = MaskSize(w);
     
     for (int i = 0; i < count; i++)
     {
-        seed = NextSeed(seed);
-        int r = seed & ~0x80000000;
-        
-        int s = r / w;
-        int t = s / h;
-        
-        int x = r - w * s;
-        int y = s - h * t;
-        
+        int x = RNG(seed, w);
+        int y = RNG(seed, h);
+
         assert(x < w);
         assert(y < h);
         
@@ -64,511 +107,20 @@ void DOL::CreateBitMask(int w, int h, uint32_t seed, uint32_t mask[])
     }
 }
 
-
-void DOL::InitDFFromBitMask(int w, int h, const uint32_t mask[], float distances[])
-{
-    // mask is expected to have rows padded to whole numbers of uint32_ts
-    int s = w * h;
-    for (int i = 0; i < s; i++)
-        distances[i] = FLT_MAX;
-    
-    int maskStride = MaskSize(w);
-    
-    for (int y = 0; y < h; y++)
-        for (int j = 0; j < maskStride; j++)
-        {
-            uint32_t m = *mask++;
-            
-            if (m == 0)
-                continue;
-            
-            float* block = distances + y * w + 32 * j;
-            
-            for (int i = 0; i < 32; i++)
-            {
-                if (m & 1)
-                    block[i] = 0.0f;
-                
-                m >>= 1;
-            }
-        }
-}
-
-void DOL::InitDFFromBitMask(int w, int h, const uint32_t mask[], int32_t distances[])
-{
-    // mask is expected to have rows padded to whole numbers of uint32_ts
-    int s = w * h;
-    for (int i = 0; i < s; i++)
-        distances[i] = INT32_MAX;
-
-    int maskStride = MaskSize(w);
-    
-    for (int y = 0; y < h; y++)
-    {
-        for (int j = 0; j < maskStride; j++)
-        {
-            uint32_t m = *mask++;
-                        
-            if (m == 0)
-                continue;
-            
-            int32_t* block = distances + y * w + 32 * j;
-            
-            for (int i = 0; i < 32; i++)
-            {
-                if (m & 1)
-                    block[i] = 0;
-                
-                m >>= 1;
-            }
-        }
-    }
-}
-
-void DOL::Chamfer(int w, int h, float distances[])
-{
-    // according to Borgefors, using these values leads to more
-    // stable and accurate results than 1, sqrt(2) with double precision even
-    // ceil(d) is still a metric, 
-    // G. Borgefors.
-    // Distance transformations in digital images.
-    
-    const float d0 = 3;
-    const float d1 = 4;
-    
-    float* row0 = distances;
-    
-    for (int y = 1; y < h; y++)
-    {
-        float* row1 = row0 + w;
-        
-        if (row1[0] > row0[0] + d0)
-            row1[0] = row0[0] + d0;
-        if (row1[0] > row0[1] + d1)
-            row1[0] = row0[1] + d1;
-        
-        for (int x = 1; x < w - 1; x++)
-        {
-            if (row1[x] > row0[x - 1] + d1)
-                row1[x] = row0[x - 1] + d1;
-            if (row1[x] > row0[x    ] + d0)
-                row1[x] = row0[x    ] + d0;
-            if (row1[x] > row0[x + 1] + d1)
-                row1[x] = row0[x + 1] + d1;
-            
-            if (row1[x] > row1[x - 1] + d0)
-                row1[x] = row1[x - 1] + d0;
-        }
-        
-        if (row1[w - 1] > row0[w - 2] + d1)
-            row1[w - 1] = row0[w - 2] + d1;
-        if (row1[w - 1] > row0[w - 1] + d0)
-            row1[w - 1] = row0[w - 1] + d0;
-        
-        if (row1[w - 1] > row1[w - 2] + d0)
-            row1[w - 1] = row1[w - 2] + d0;
-        
-        row0 = row1;
-    }
-
-    row0 = distances + h * w - w;
-    
-    for (int y = h - 2; y >= 0; y--)
-    {
-        float* row1 = row0 - w;
-        
-        if (row1[w - 1] > row0[w - 1] + d0)
-            row1[w - 1] = row0[w - 1] + d0;
-        if (row1[w - 1] > row0[w - 2] + d1)
-            row1[w - 1] = row0[w - 2] + d1;
-        
-        for (int x = w - 2; x > 0; x--)
-        {
-            if (row1[x] > row0[x + 1] + d1)
-                row1[x] = row0[x + 1] + d1;
-            if (row1[x] > row0[x    ] + d0)
-                row1[x] = row0[x    ] + d0;
-            if (row1[x] > row0[x - 1] + d1)
-                row1[x] = row0[x - 1] + d1;
-            
-            if (row1[x] > row1[x + 1] + d0)
-                row1[x] = row1[x + 1] + d0;
-        }
-        
-        if (row1[0] > row0[1] + d1)
-            row1[0] = row0[1] + d1;
-        if (row1[0] > row0[0] + d0)
-            row1[0] = row0[0] + d0;
-        
-        if (row1[0] > row1[1] + d0)
-            row1[0] = row1[1] + d0;
-        
-        row0 = row1;
-    }
-}
-
-void DOL::Chamfer(int w, int h, int32_t distances[])
-{
-    // according to Borgefors, using these values leads to more
-    // stable and accurate results than 1, sqrt(2) with double precision even
-    // ceil(d) is still a metric, 
-    // G. Borgefors.
-    // Distance transformations in digital images.
-    
-    const int d0 = 3;
-    const int d1 = 4;
-    
-    int32_t* row0 = distances;
-    
-    for (int y = 1; y < h; y++)
-    {
-        int32_t* row1 = row0 + w;
-        
-        if (row1[0] > row0[0] + d0)
-            row1[0] = row0[0] + d0;
-        if (row1[0] > row0[1] + d1)
-            row1[0] = row0[1] + d1;
-        
-        for (int x = 1; x < w - 1; x++)
-        {
-            if (row1[x] > row0[x - 1] + d1)
-                row1[x] = row0[x - 1] + d1;
-            if (row1[x] > row0[x    ] + d0)
-                row1[x] = row0[x    ] + d0;
-            if (row1[x] > row0[x + 1] + d1)
-                row1[x] = row0[x + 1] + d1;
-            
-            if (row1[x] > row1[x - 1] + d0)
-                row1[x] = row1[x - 1] + d0;
-        }
-        
-        if (row1[w - 1] > row0[w - 2] + d1)
-            row1[w - 1] = row0[w - 2] + d1;
-        if (row1[w - 1] > row0[w - 1] + d0)
-            row1[w - 1] = row0[w - 1] + d0;
-        
-        if (row1[w - 1] > row1[w - 2] + d0)
-            row1[w - 1] = row1[w - 2] + d0;
-        
-        row0 = row1;
-    }
-    
-    row0 = distances + h * w - w;
-    
-    for (int y = h - 2; y >= 0; y--)
-    {
-        int32_t* row1 = row0 - w;
-        
-        if (row1[w - 1] > row0[w - 1] + d0)
-            row1[w - 1] = row0[w - 1] + d0;
-        if (row1[w - 1] > row0[w - 2] + d1)
-            row1[w - 1] = row0[w - 2] + d1;
-        
-        for (int x = w - 2; x > 0; x--)
-        {
-            if (row1[x] > row0[x + 1] + d1)
-                row1[x] = row0[x + 1] + d1;
-            if (row1[x] > row0[x    ] + d0)
-                row1[x] = row0[x    ] + d0;
-            if (row1[x] > row0[x - 1] + d1)
-                row1[x] = row0[x - 1] + d1;
-            
-            if (row1[x] > row1[x + 1] + d0)
-                row1[x] = row1[x + 1] + d0;
-        }
-        
-        if (row1[0] > row0[1] + d1)
-            row1[0] = row0[1] + d1;
-        if (row1[0] > row0[0] + d0)
-            row1[0] = row0[0] + d0;
-        
-        if (row1[0] > row1[1] + d0)
-            row1[0] = row1[1] + d0;
-        
-        row0 = row1;
-    }
-}
-
-// To adapt to 3D: need new chamfer approx values. See DistanceTransform.pdf
-// To adapt to height field: ...
-
-void DOL::InitDeltaFromBitMask(int w, int h, const uint32_t mask[], cCellDelta2 delta[])
-{
-    cCellDelta2 maxDelta = { kMaxDelta2, kMaxDelta2 };
-    cCellDelta2 minDelta = { 0, 0 };
-    
-    int s = w * h;
-    for (int i = 0; i < s; i++)
-        delta[i] = maxDelta;
-    
-    const int maskStride = MaskSize(w);
-    
-    for (int y = 0; y < h; y++)
-        for (int j = 0; j < maskStride * 32; j += 32)
-        {
-            uint32_t m = (*mask++);
-            
-            if (m == 0)
-                continue;
-            
-            cCellDelta2* block = delta + y * w + j;
-            
-            for (int i = 0; i < 32; i++)
-            {
-                if (m & 1)
-                    block[i] = minDelta;
-                
-                m >>= 1;
-            }
-        }
-}
-
-
-// Theory: Danielsson sweep is the same as the fast sweeping except
-// it wraps the alternating x scans into one vertical sweep.
-// Despite claims in papers, it seems its mem access density is approx 6wh,
-// vs fs' 4 x 2wh = 8wh.
-// in 3D, Danielsson is 8wh * d + wh x d-1 x 2 =~ 10whd
-// vs 8 x 3 x whd(!)
-
-#define ONE_WAY_X 0
-// this doesn't make a difference, because first rows are dealt with by
-// the last row of the alternate sweep
-#define DO_FIRST_ROWS 1
-
 namespace
 {
-    /// Returns true if d0 is closer than d1 
-    inline bool Closer(cCellDelta2 d0, cCellDelta2 d1)
-    {
-        int dw0 = d0.x * d0.x + d0.y * d0.y;
-        int dw1 = d1.x * d1.x + d1.y * d1.y;
-        
-        return dw0 > dw1;
-    }
-}
-
-void DOL::Danielsson(int w, int h, cCellDelta2 delta[])
-{
-    // store dx^2, dy^2 to nearest point. distance = sqrt(dx^2 + dy^2).
-    // - mostly accurate, doesn't overestimate like Chamfer.
-    // Cui99 CM99 fix errors
-    // O. Cuisenaire and B. Macq.
-    // Fast euclidean distance transformations by propagation using multiple neighbourhoods.    
-
-    cCellDelta2* row0 = delta;
-    cCellDelta2 cell;
-
-#if DO_FIRST_ROWS
-    for (int i = 1; i < w; i++)
-    {
-        cell.x = row0[i - 1].x - 1;
-        cell.y = row0[i - 1].y;
-
-        if (Closer(row0[i], cell))
-            row0[i] = cell;
-    }
-#endif
-    
-    for (int j = 1; j < h; j++)
-    {
-        cCellDelta2* row1 = row0 + w;
-        
-        for (int i = 0; i < w; i++)
-        {
-            cell.x = row0[i].x;
-            cell.y = row0[i].y - 1;
-
-            if (Closer(row1[i], cell))
-                row1[i] = cell;
-        }
-        
-        for (int i = 1; i < w; i++)
-        {
-            cell.x = row1[i - 1].x - 1;
-            cell.y = row1[i - 1].y;
-
-            if (Closer(row1[i], cell))
-                row1[i] = cell;
-        }
-#if !ONE_WAY_X
-        for (int i = w - 2; i >= 0; i--)
-        {
-            cell.x = row1[i + 1].x + 1;
-            cell.y = row1[i + 1].y;
-            
-            if (Closer(row1[i], cell))
-                row1[i] = cell;
-        }
-#endif
-        
-        row0 = row1;
-    }
-
-    row0 = delta + h * w - w;
-    
-#if DO_FIRST_ROWS
-    for (int i = w - 2; i >= 0; i--)
-    {
-        cell.x = row0[i + 1].x + 1;
-        cell.y = row0[i + 1].y;
-
-        
-        if (Closer(row0[i], cell))
-            row0[i] = cell;
-    }
-#endif
-    
-    for (int j = h - 1; j > 0; j--)
-    {
-        cCellDelta2* row1 = row0 - w;
-        
-        for (int i = 0; i < w; i++)
-        {
-            cell.x = row0[i].x;
-            cell.y = row0[i].y + 1;
-            
-            if (Closer(row1[i], cell))
-                row1[i] = cell;
-        }
-        
-#if !ONE_WAY_X
-        for (int i = 1; i < w; i++)
-        {
-            cell.x = row1[i - 1].x - 1;
-            cell.y = row1[i - 1].y;
-            
-            if (Closer(row1[i], cell))
-                row1[i] = cell;
-        }
-#endif
-        
-        for (int i = w - 2; i >= 0; i--)
-        {
-            cell.x = row1[i + 1].x + 1;
-            cell.y = row1[i + 1].y;
-            
-            if (Closer(row1[i], cell))
-                row1[i] = cell;
-        }
-        
-        row0 = row1;
-    }
-}
-
-void DOL::FastSweep(int w, int h, cCellDelta2 delta[])
-{
-    // Fast sweep approach -- sweep each diagonal in turn.
-    int lastRow = w * (h - 1);
-    
-    int sdx[4] = { +1, -1, +1, -1 };
-    int sdy[4] = { +1, +1, -1, -1 };
-    
-    int ib[2] = { 0, w - 1 };
-    int ie[2] = { w,    -1 };
-    
-    int rowStart[2] = { 0, lastRow };
-    cCellDelta2 cell;
-
-    for (int sweep = 0; sweep < 4; sweep++)
-    {
-        const int dx = sdx[sweep];
-        const int dy = sdy[sweep];
-
-        const int sweepX = (sweep >> 0) & 1;
-        const int sweepY = (sweep >> 1) & 1;
-        
-        cCellDelta2* row0 = delta + rowStart[sweepY];
-        
-        for (int j = 1; j < h; j++)
-        {
-            cCellDelta2* row1 = row0 + w * dy;
-        
-            for (int i = ib[sweepX]; i != ie[sweepX]; i += dx)
-            {
-                cell.x = row0[i].x;
-                cell.y = row0[i].y - dy;
-                
-                if (Closer(row1[i], cell))
-                    row1[i] = cell;
-            }
-
-            for (int i = ib[sweepX] + dx; i != ie[sweepX]; i += dx)
-            {
-                cell.x = row1[i - dx].x - dx;
-                cell.y = row1[i - dx].y;
-
-                if (Closer(row1[i], cell))
-                    row1[i] = cell;
-            }
-            
-            row0 = row1;
-        }
-    }
-}
-
-// Brute force -- for checking only!
-void DOL::FindOptimalDeltas(int w, int h, cCellDelta2 delta[])
-{
-    for (int i = 0; i < h; i++)
-        for (int j = 0; j < w; j++)
-        {
-            cCellDelta2* cell = delta + i * w + j;
-            if (cell->x != 0 || cell->y != 0)
-                continue;
-
-            for (int y = 0; y < h; y++)
-                for (int x = 0; x < w; x++)
-                {
-                    cCellDelta2* cell = delta + y * w + x;
-                    
-                    int d0 = (i - y) * (i - y) + (j - x) * (j - x); // d2 to i, j
-                    int d1 = cell->x * cell->x + cell->y * cell->y; // current
-                    
-                    if (d0 < d1)
-                    {
-                        cell->x = j - x;
-                        cell->y = i - y;
-                    }
-                }
-            
-        }
-}
-
-
-
-namespace
-{
-    void FillBlock(int rs, int x0, int x1, int y0, int y1, float* dirW[4])
-    {
-        for (int y = y0; y <= y1; y++)
-            for (int x = x0; x <= x1; x++)
-            {
-                int i = y * rs + x;
-                
-                for (int k = 0; k < 4; k++)
-                    dirW[k][i] = 1.0f;
-            }
-    }
-
     uint32_t LeftMask(int n)
     {
-        uint32_t result = 0;
-
-        for ( ; n < 32; n++)
-            result |= 1 << n;
-
-        return result;
+        assert(n < 32);
+        uint32_t bit = (1 << n);
+        return ~(bit - 1);
     }
 
     uint32_t RightMask(int n)
     {
-        uint32_t result = 0;
-
-        for (int i = 0; i <= n; i++)
-            result |= 1 << i;
-
-        return result;
+        assert(n < 32);
+        uint32_t bit = 1 << n;
+        return bit + (bit - 1); // Inclusive
     }
 
     void FillMaskBlock(int rs, int x0, int x1, int y0, int y1, uint32_t mask[])
@@ -599,18 +151,18 @@ namespace
     }
 }
 
-void DOL::CreateBitMaskFromBlock(int w, int h, int sides, uint32_t mask[])
+void DOL::BitMaskAddBlock(int w, int h, int sides, uint32_t mask[])
 {
-    int sw = MaskSize(w);
-    int maskSize = sw * h;
-
-    memset(mask, 0, sizeof(mask[0]) * maskSize);
-    
     int x0 = w / 4;
-    int x1 = x0 + w / 2;
+    int x1 = x0 + w / 2 - 1;
     int y0 = h / 3;
-    int y1 = y0 + h / 3;
-    
+    int y1 = y0 + h / 3 - 1;
+
+    int sw = MaskSize(w);
+
+    if (sides > 4)
+        return FillMaskBlock(sw, x0, x1, y0, y1, mask);
+
     if (sides > 0)
         FillMaskBlock(sw, x0, x1, y0, y0, mask);
     if (sides > 1)
@@ -621,7 +173,942 @@ void DOL::CreateBitMaskFromBlock(int w, int h, int sides, uint32_t mask[])
         FillMaskBlock(sw, x1, x1, y0, y1, mask);
 }
 
+namespace
+{
+    template<class T> void InitDistancesFromBitMask(int w, int h, const uint32_t mask[], T distances[], T maxD)
+    {
+        // mask is expected to have rows padded to whole numbers of uint32_ts
+        int s = w * h;
+        for (int i = 0; i < s; i++)
+            distances[i] = maxD;
 
+        int maskStride = MaskSize(w);
+        
+        for (int y = 0; y < h; y++)
+        {
+            for (int j = 0; j < maskStride; j++)
+            {
+                uint32_t m = *mask++;
+                
+                if (m == 0)
+                    continue;
+                
+                T* block = distances + y * w + 32 * j;
+                
+                ITER_SET_BITS_BEGIN(m)
+                    block[i] = 0;
+                ITER_SET_BITS_END
+            }
+        }
+    }
+}
+
+void DOL::InitDistancesFromBitMask(int w, int h, const uint32_t mask[], int16_t distances[], int16_t maxD)
+{
+    return ::InitDistancesFromBitMask<int16_t>(w, h, mask, distances, maxD);
+}
+void DOL::InitDistancesFromBitMask(int w, int h, const uint32_t mask[], int32_t distances[], int32_t maxD)
+{
+    return ::InitDistancesFromBitMask<int32_t>(w, h, mask, distances, maxD);
+}
+void DOL::InitDistancesFromBitMask(int w, int h, const uint32_t mask[], float distances[], float maxD)
+{
+    return ::InitDistancesFromBitMask<float>(w, h, mask, distances, maxD);
+}
+
+void DOL::InitDeltasFromBitMask(int w, int h, const uint32_t mask[], cCellDelta2 deltas[], bool invert)
+{
+    const cCellDelta2 maxDelta = { kMaxDelta2, kMaxDelta2 };
+    const cCellDelta2 minDelta = { 0, 0 };
+    
+    for (int i = 0; i < w * h; i++)
+        deltas[i] = maxDelta;
+    
+    const int      maskStride = MaskSize(w);
+    const uint32_t maskInvert = invert ? ~uint32_t(0) : 0;
+
+    for (int y = 0; y < h; y++)
+        for (int j = 0; j < maskStride * 32; j += 32)
+        {
+            uint32_t m = (*mask++) ^ maskInvert;
+            
+            if (m == 0)
+                continue;
+            
+            cCellDelta2* block = deltas + y * w + j;
+            const int n = (w - j) >= 32 ? 32 : (w - j);
+
+            for (int i = 0; i < n; i++) // XXX
+            {
+                if (m & 1)
+                    block[i] = minDelta;
+                
+                m >>= 1;
+            }
+        }
+}
+
+namespace
+{
+    // Utilities for setting deltas for cells adjacent to the interior/exterior
+    // boundary, in units of half a cell width. E.g., a cell immediately to the
+    // left of the boundary will have a delta of (+1, 0), reflecting that the
+    // boundary is half a cell to right of the cell's centre.
+    // By initialising the SDF this way, we can calculate both interior and
+    // exterior distances in a single pass, and distances are consistent across
+    // the border. (The standard techique of calculating the exterior distances,
+    // then inverting the problem to calculate interior distances, and combining
+    // the two results, is both 2x as expensive, and leads to inconsistent
+    // distances on border cells. The border effectively has a width of -ve 1.
+    
+    constexpr cCellDelta2 kBH0 = { 0, +1 };  // level set is half a cell up
+    constexpr cCellDelta2 kBH1 = { 0, -1 };  // level set is half a cell down
+    constexpr cCellDelta2 kBW0 = { +1, 0 };  // level set is half a cell right
+    constexpr cCellDelta2 kBW1 = { -1, 0 };  // level set is half a cell left
+
+#ifdef USE_BORDER_REFERENCE
+    // These routines treat each border case separately, in turn, for clarity.
+    // They are useful both for understanding the logic, but also for sanity-
+    // checking the more complex all-in-one routine. (See SetBorderCellsCombo.)
+    void SetBorderCellsH(int w, int h, const uint32_t* const mask, cCellDelta2 deltas[])
+    {
+        // Find horizontal edges...
+        //   x        .
+        //   .   or   x
+        // and set the cells to either side accordingly
+
+        const int maskStride = MaskSize(w);
+
+        for (int y = 0; y < h - 1; y++)
+        {
+            const uint32_t* maskRow0   = mask   + (y + 0) * maskStride;
+            const uint32_t* maskRow1   = mask   + (y + 1) * maskStride;
+            cCellDelta2*    deltasRow0 = deltas + (y + 0) * w;
+            cCellDelta2*    deltasRow1 = deltas + (y + 1) * w;
+
+            for (int j = 0; j < maskStride; j++)
+            {
+                uint32_t m0 = maskRow0[j];
+                uint32_t m1 = maskRow1[j];
+                uint32_t mx = m0 ^ m1;  // 1 on change
+
+                if (mx)
+                {
+                    cCellDelta2* block0 = deltasRow0 + j * 32;
+                    cCellDelta2* block1 = deltasRow1 + j * 32;
+
+                    for (int i = 0; i < 32; i++)
+                        if ((mx & (1 << i)))
+                        {
+                            if (j * 32 + i >= w)    // delayed check as we get here relatively rarely
+                                break;
+
+                            assert(j * 32 + i >= 0);
+                            assert(j * 32 + i < w);
+
+                            block0[i] = kBH0;
+                            block1[i] = kBH1;
+                        }
+                }
+            }
+        }
+    }
+
+    void SetBorderCellsW(int w, int h, const uint32_t* const mask, cCellDelta2 deltas[])
+    {
+        // Find vertical edges...
+        //   .|x   or   x|.
+        // and set the cells to either side accordingly
+
+        const int maskStride = MaskSize(w);
+
+        for (int y = 0; y < h; y++)
+        {
+            const uint32_t* maskRow   = mask   + y * maskStride;
+            cCellDelta2*    deltasRow = deltas + y * w;
+
+            uint32_t lastBit = maskRow[0] & 1; // repeat border cell, avoids extra logic to loop from 1 rather than 0.
+
+            for (int j = 0; j < maskStride; j++)
+            {
+                uint32_t m0 = maskRow[j];
+                uint32_t m1 = (m0 << 1) | lastBit;
+                lastBit = m0 >> 31;
+
+                // Effectively bit 'i' indexes cell i (m0) and cell i-1 (m1). It's
+                // done this way to avoid having to look ahead one word up front.
+
+                uint32_t mx = m0 ^ m1;
+
+                if (mx)
+                {
+                    cCellDelta2* block = deltasRow + j * 32;
+
+                    for (int i = 0; i < 32; i++)
+                        if ((mx & (1 << i)))
+                        {
+                            if (j * 32 + i >= w)    // delayed check as we get here relatively rarely
+                                break;
+
+                            assert(j * 32 + i > 0);
+                            assert(j * 32 + i < w);
+
+                            block[i - 1] = kBW0;
+                            block[i + 0] = kBW1;
+                        }
+                }
+            }
+        }
+    }
+
+    constexpr cCellDelta2 kBC00 = { -1, +1 };
+    constexpr cCellDelta2 kBC01 = { +1, -1 };
+    constexpr cCellDelta2 kBC10 = { +1, +1 };
+    constexpr cCellDelta2 kBC11 = { -1, -1 };
+
+    void SetBorderCellsC(int w, int h, const uint32_t* const mask, cCellDelta2 deltas[])
+    {
+        // Look for diagonal borders affecting corners, i.e.,
+        //  . x       x .
+        //  x .   or  . x
+        // and set the diagonal cell deltas to +-1, +-1 as appropriate.
+        // These may be overwritten by horizontal/vertical deltas later, as they
+        // will always be closer.
+
+        const int maskStride = MaskSize(w);
+
+        for (int y = 0; y < h - 1; y++)
+        {
+            const uint32_t* maskRow0   = mask   + (y + 0) * maskStride;
+            const uint32_t* maskRow1   = mask   + (y + 1) * maskStride;
+            cCellDelta2*    deltasRow0 = deltas + (y + 0) * w;
+            cCellDelta2*    deltasRow1 = deltas + (y + 1) * w;
+
+            uint32_t lastBit0 = maskRow1[0] & 1;    // pick to avoid detection on i=j=0 without explicit check
+            uint32_t lastBit1 = maskRow0[0] & 1;
+
+            for (int j = 0; j < maskStride; j++)
+            {
+                uint32_t m00 = maskRow0[j];
+                uint32_t m01 = maskRow1[j];
+
+                uint32_t m10 = (m00 << 1) | lastBit0;
+                uint32_t m11 = (m01 << 1) | lastBit1;
+
+                lastBit0 = m00 >> 31;
+                lastBit1 = m01 >> 31;
+
+                uint32_t mc0 = m00 ^ m11;   // forward diagonal
+                uint32_t mc1 = m01 ^ m10;   // backward diagonal
+
+                if (mc0 | mc1)
+                {
+                    cCellDelta2* block[2] = { deltasRow0 + j * 32, deltasRow1 + j * 32 };
+
+                    for (int i = 0; i < 32; i++)
+                    {
+                        if ((mc0 & (1 << i)))
+                        {
+                            if (j * 32 + i >= w)    // delayed check as we get here relatively rarely
+                                break;
+
+                            assert(j * 32 + i > 0);
+                            assert(j * 32 + i < w);
+
+                            block[0][i + 0] = kBC00;
+                            block[1][i - 1] = kBC01;
+                        }
+                        if ((mc1 & (1 << i)) && (j * 32 + i < w))
+                        {
+                            if (j * 32 + i >= w)    // delayed check as we get here relatively rarely
+                                break;
+
+                            assert(j * 32 + i > 0);
+                            assert(j * 32 + i < w);
+
+                            block[0][i - 1] = kBC10;
+                            block[1][i + 0] = kBC11;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    void SetBorderCellsC2(int w, int h, const uint32_t* const mask, cCellDelta2 deltas[])
+    {
+        // Smarter version that figures out which particular cell
+        // of the diagonal should be set. Reduces writes by 2x.
+
+        const int maskStride = MaskSize(w);
+
+        for (int y = 0; y < h - 1; y++)
+        {
+            const uint32_t* maskRow0   = mask   + (y + 0) * maskStride;
+            const uint32_t* maskRow1   = mask   + (y + 1) * maskStride;
+            cCellDelta2*    deltasRow0 = deltas + (y + 0) * w;
+            cCellDelta2*    deltasRow1 = deltas + (y + 1) * w;
+
+            uint32_t lastBit0 = maskRow0[0] & 1;
+            uint32_t lastBit1 = maskRow1[0] & 1;
+
+            for (int j = 0; j < maskStride; j++)
+            {
+                uint32_t m00 = maskRow0[j];
+                uint32_t m01 = maskRow1[j];
+
+                uint32_t m10 = (m00 << 1) | lastBit0;
+                uint32_t m11 = (m01 << 1) | lastBit1;
+
+                lastBit0 = m00 >> 31;
+                lastBit1 = m01 >> 31;
+
+                // we have a corner cell if both verticals (or horizontals) feature one flip
+                uint32_t mv0 = m00 ^ m01;  // 1 on vert change
+                uint32_t mv1 = m10 ^ m11;  // 1 on vert change
+                uint32_t mh0 = m00 ^ m10;  // 1 on change
+
+                uint32_t mc = (mv0 ^ mv1);
+
+                if (mc)
+                {
+                    cCellDelta2* block[2] = { deltasRow0 + j * 32, deltasRow1 + j * 32 };
+
+                    for (int i = 0; i < 32; i++)
+                        if (mc & (1 << i))
+                        {
+                            if (j * 32 + i >= w)    // delayed check as we get here relatively rarely
+                                break;
+
+                            assert(j * 32 + i > 0);
+                            assert(j * 32 + i < w);
+
+                            int dx = (mv1 >> i) & 1;
+                            int dy = (mh0 >> i) & 1;
+
+                            block[dy][i + dx - 1].x = 1 - 2 * dx;
+                            block[dy][i + dx - 1].y = 1 - 2 * dy;
+                        }
+                }
+            }
+        }
+    }
+
+#else
+
+    void SetBorderCellsCombo(int w, int h, const uint32_t* const mask, cCellDelta2 deltas[])
+    {
+        // Rolls everything into one pass
+        const int maskStride = MaskSize(w);
+
+        for (int y = 0; y < h - 1; y++)
+        {
+            const uint32_t* maskRow0   = mask   + (y + 0) * maskStride;
+            const uint32_t* maskRow1   = mask   + (y + 1) * maskStride;
+            cCellDelta2*    deltasRow0 = deltas + (y + 0) * w;
+            cCellDelta2*    deltasRow1 = deltas + (y + 1) * w;
+
+            uint32_t lastBit0 = maskRow0[0] & 1;    // pick to avoid vertical i=0 check
+            uint32_t lastBit1 = maskRow1[0] & 1;
+
+            for (int j = 0; j < maskStride; j++)
+            {
+                uint32_t m00 = maskRow0[j];
+                uint32_t m01 = maskRow1[j];
+                uint32_t m10 = (m00 << 1) | lastBit0;
+                uint32_t m11 = (m01 << 1) | lastBit1;
+
+                lastBit0 = m00 >> 31;
+                lastBit1 = m01 >> 31;
+
+                cCellDelta2* block[2] = { deltasRow0 + j * 32, deltasRow1 + j * 32 };
+
+                // Horizontal
+                uint32_t ey = m00 ^ m01;  // 1 on change
+
+                // Corner. These are much rarer, and we must check to ensure we don't
+                // overwrite edge deltas, as they are larger.
+                uint32_t ex = m00 ^ m10;
+                uint32_t eyx = m10 ^ m11;
+                uint32_t bc = ey ^ eyx;
+
+                // The order here is important as iterating over the masks can destroy them
+
+                // if (ex | ey | bc) early out currently not worth it
+                ITER_SET_BITS_BEGIN(bc)
+                    assert(j * 32 + i > 0);
+
+                    int dx = (eyx >> i) & 1;
+                    int dy = (ex  >> i) & 1;
+
+                    cCellDelta2& corner = block[dy][i + dx - 1];
+
+                    if (corner.x != kMaxDelta2)
+                        continue;
+
+                    corner.x = 1 - 2 * dx;
+                    corner.y = 1 - 2 * dy;
+                ITER_SET_BITS_END
+
+                ITER_SET_BITS_BEGIN(ex)
+                    assert(j * 32 + i > 0);
+                    block[0][i - 1] = kBW0;
+                    block[0][i + 0] = kBW1;
+                ITER_SET_BITS_END
+
+                ITER_SET_BITS_BEGIN(ey)
+                    block[0][i] = kBH0;
+                    block[1][i] = kBH1;
+                ITER_SET_BITS_END
+            }
+        }
+
+        // Finish last vertical row
+        {
+            const int y = h - 1;
+            const uint32_t* maskRow   = mask   + y * maskStride;
+            cCellDelta2*    deltasRow = deltas + y * w;
+
+            uint32_t lastBit = maskRow[0] & 1; // repeat border cell, avoids extra logic to loop from 1 rather than 0.
+
+            for (int j = 0; j < maskStride; j++)
+            {
+                uint32_t m0 = maskRow[j];
+                uint32_t m1 = (m0 << 1) | lastBit;
+                lastBit = m0 >> 31;
+
+                uint32_t mvx = m0 ^ m1;
+
+                if (mvx)
+                {
+                    cCellDelta2* block = deltasRow + j * 32;
+
+                    ITER_SET_BITS_BEGIN(mvx)
+                        assert(j * 32 + i > 0);
+                        block[i - 1] = kBW0;
+                        block[i + 0] = kBW1;
+                    ITER_SET_BITS_END
+                }
+            }
+        }
+    }
+#endif
+}
+
+
+void DOL::InitBorderDeltasFromBitMask(int w, int h, const uint32_t* const mask, cCellDelta2 deltas[])
+{
+    const cCellDelta2 maxDelta = { kMaxDelta2, kMaxDelta2 };
+
+    int s = w * h;
+    for (int i = 0; i < s; i++)
+        deltas[i] = maxDelta;
+
+#ifdef USE_BORDER_REFERENCE
+    SetBorderCellsC(w, h, mask, deltas);
+    SetBorderCellsH(w, h, mask, deltas);
+    SetBorderCellsW(w, h, mask, deltas);
+#else
+    SetBorderCellsCombo(w, h, mask, deltas);
+#endif
+}
+
+namespace
+{
+    /// Returns true if d1 is closer than d0
+    inline bool Closer(cCellDelta2 d0, cCellDelta2 d1)
+    {
+        int dw0 = d0.x * d0.x + d0.y * d0.y;
+        int dw1 = d1.x * d1.x + d1.y * d1.y;
+        
+        return dw0 > dw1;
+    }
+}
+
+void DOL::FastSweep(int w, int h, cCellDelta2 deltas[], int cw)
+{
+    // Fast sweep approach -- sweep each diagonal in turn.
+    // This is really the canonical sweeping method -- each sweep calculates
+    // distances over a quadrant, as for each cell in the sweep, you can 
+    // guarantee all cells in the corresponding quadrant defined by that cell
+    // and the start point have already been visited.
+    // Other approaches such as Danielsson and Chamfer combine sweeps and vary
+    // the inspected neighbours to trade speed vs. accuracy.
+    // 
+    // See, e.g., "A fast sweeping method for Eikonal equations" Zhao 2004.
+    
+    const int lastRow = w * (h - 1);
+    cCellDelta2 cell;
+
+    for (int sweep = 0; sweep < 4; sweep++)
+    {
+        const int sx = (sweep >> 0) & 1;
+        const int sy = (sweep >> 1) & 1;
+
+        const int dx = 1 - 2 * sx;
+        const int dy = 1 - 2 * sy;
+        const int cx = -cw * dx;
+        const int cy = -cw * dy;
+
+        const int ib =     sx * (w - 1);
+        const int ie = w - sx * (w + 1);
+
+        cCellDelta2* row0 = deltas + sy * lastRow;
+
+        for (int j = 1; j < h; j++)
+        {
+            cCellDelta2* row1 = row0 + w * dy;
+
+            for (int i = ib; i != ie; i += dx)
+            {
+                // Testing showed early out check for c = 0, 0 not worth it
+                // even with large contiguous areas of interior cells. Actively
+                // harmful in other cases due to branch overhead.
+                cell.x = row0[i].x;
+                cell.y = row0[i].y + cy;
+
+                if (Closer(row1[i], cell))
+                    row1[i] = cell;
+            }
+
+            for (int i = ib + dx; i != ie; i += dx)
+            {
+                cell.x = row1[i - dx].x + cx;
+                cell.y = row1[i - dx].y;
+
+                if (Closer(row1[i], cell))
+                    row1[i] = cell;
+
+                cell.x = row0[i - dx].x + cx;
+                cell.y = row0[i - dx].y + cy;
+
+                if (Closer(row1[i], cell))
+                    row1[i] = cell;
+            }
+
+            row0 = row1;
+        }
+    }
+}
+
+// Danielsson is similar to the quadrant sweep approach (FastSweep), except it
+// wraps alternating x scans into one vertical sweep.
+
+void DOL::Danielsson(int w, int h, cCellDelta2 deltas[], int cw)
+{
+    // store dx^2, dy^2 to nearest point. distance = sqrt(dx^2 + dy^2).
+    // Much more accurate, doesn't over-estimate like Chamfer.
+    cCellDelta2* row0 = deltas;
+    cCellDelta2 cell;
+
+    for (int j = 1; j < h; j++)
+    {
+        cCellDelta2* row1 = row0 + w;
+        
+        for (int i = 0; i < w; i++)
+        {
+            cell.x = row0[i].x;
+            cell.y = row0[i].y - cw;
+
+            if (Closer(row1[i], cell))
+                row1[i] = cell;
+        }
+        
+        for (int i = 1; i < w; i++)
+        {
+            cell.x = row1[i - 1].x - cw;
+            cell.y = row1[i - 1].y;
+
+            if (Closer(row1[i], cell))
+                row1[i] = cell;
+        }
+
+        for (int i = w - 2; i >= 0; i--)
+        {
+            cell.x = row1[i + 1].x + cw;
+            cell.y = row1[i + 1].y;
+            
+            if (Closer(row1[i], cell))
+                row1[i] = cell;
+        }
+
+        row0 = row1;
+    }
+
+    row0 = deltas + h * w - w;
+
+    for (int j = h - 1; j > 0; j--)
+    {
+        cCellDelta2* row1 = row0 - w;
+        
+        for (int i = 0; i < w; i++)
+        {
+            cell.x = row0[i].x;
+            cell.y = row0[i].y + cw;
+            
+            if (Closer(row1[i], cell))
+                row1[i] = cell;
+        }
+        
+        for (int i = 1; i < w; i++)
+        {
+            cell.x = row1[i - 1].x - cw;
+            cell.y = row1[i - 1].y;
+            
+            if (Closer(row1[i], cell))
+                row1[i] = cell;
+        }
+
+        for (int i = w - 2; i >= 0; i--)
+        {
+            cell.x = row1[i + 1].x + cw;
+            cell.y = row1[i + 1].y;
+            
+            if (Closer(row1[i], cell))
+                row1[i] = cell;
+        }
+        
+        row0 = row1;
+    }
+}
+
+namespace
+{
+    void JumpFlood(int step, int w, int h, cCellDelta2 deltasIn[], cCellDelta2 deltasOut[], int cw)
+    {
+        const cCellDelta2* row    = deltasIn;
+        cCellDelta2*       rowOut = deltasOut;
+
+        for (int j = 0; j < h; j++)
+        {
+            for (int i = 0; i < w; i++)
+            {
+                cCellDelta2 minCell = row[i]; 
+                
+                if (i - step >= 0)
+                {
+                    cCellDelta2 cell = row[i - step];
+                    cell.x -= cw * step;
+                    
+                    if (Closer(minCell, cell))
+                        minCell = cell;
+
+                    if (j - step >= 0)
+                    {
+                        cCellDelta2 cell = row[i - step - step * w];
+                        cell.x -= cw * step;
+                        cell.y -= cw * step;
+
+                        if (Closer(minCell, cell))
+                            minCell = cell;
+                    }
+
+                    if (j + step < h)
+                    {
+                        cCellDelta2 cell = row[i - step + step * w];
+                        cell.x -= cw * step;
+                        cell.y += cw * step;
+
+                        if (Closer(minCell, cell))
+                            minCell = cell;
+                    }
+                }
+
+                if (i + step < w)
+                {
+                    cCellDelta2 cell = row[i + step];
+                    cell.x += cw * step;
+
+                    if (Closer(minCell, cell))
+                        minCell = cell;
+
+                    if (j - step >= 0)
+                    {
+                        cCellDelta2 cell = row[i + step - step * w];
+                        cell.x += cw * step;
+                        cell.y -= cw * step;
+
+                        if (Closer(minCell, cell))
+                            minCell = cell;
+                    }
+
+                    if (j + step < h)
+                    {
+                        cCellDelta2 cell = row[i + step + step * w];
+                        cell.x += cw * step;
+                        cell.y += cw * step;
+
+                        if (Closer(minCell, cell))
+                            minCell = cell;
+                    }
+                }
+
+                if (j - step >= 0)
+                {
+                    cCellDelta2 cell = row[i - step * w];
+                    cell.y -= cw * step;
+
+                    if (Closer(minCell, cell))
+                        minCell = cell;
+                }
+
+                if (j + step < h)
+                {
+                    cCellDelta2 cell = row[i + step * w];
+                    cell.y += cw * step;
+
+                    if (Closer(minCell, cell))
+                        minCell = cell;
+                }
+
+                rowOut[i] = minCell; 
+            }
+            
+            row    += w;
+            rowOut += w;
+        }
+    }
+
+    int FloorPow2(int v)
+    {
+        v |= v >> 1;
+        v |= v >> 2;
+        v |= v >> 4;
+        v |= v >> 8;
+        v |= v >> 16;
+
+        return (v + 1) >> 1;
+    }
+}
+
+void DOL::JumpFlood(int w, int h, cCellDelta2 deltas[], int cw)
+{
+    cCellDelta2* temp = new cCellDelta2[w * h];
+    cCellDelta2* d0 = deltas;
+    cCellDelta2* d1 = temp;
+
+    int step = FloorPow2((w >= h ? w : h) - 1);
+
+    for ( ; step > 0; step /= 2)
+    {
+        ::JumpFlood(step, w, h, d0, d1, cw);
+
+        cCellDelta2* dt = d0;
+        d0 = d1;
+        d1 = dt;
+    }
+
+    if (d0 != deltas)
+        ::JumpFlood(1, w, h, d0, deltas, cw);    // we could copy, but might as well do another round
+
+    delete[] temp;
+}
+
+
+namespace
+{
+    // G. Borgefors.
+    // Distance transformations in digital images.
+
+    template<class T> int Chamfer(int w, int h, T distances[])
+    {
+        // according to Borgefors, using these values leads to more
+        // stable and accurate results than 1, sqrt(2) with double precision.
+        // See Table 1 in Borgefors '86. The resulting distances must be
+        // divided by d0 once the algorithm is complete.
+
+        const T d0 = 3;
+        const T d1 = 4;
+
+        T* row0 = distances;
+
+        for (int x = 1; x < w; x++)             // restricted mask for y=0
+            if (row0[x] > row0[x - 1] + d0)
+                row0[x] = row0[x - 1] + d0;
+
+        for (int y = 1; y < h; y++)
+        {
+            T* row1 = row0 + w;
+
+            if (row1[0] > row0[0] + d0)         // restricted mask for x=0
+                row1[0] = row0[0] + d0;
+            if (row1[0] > row0[1] + d1)
+                row1[0] = row0[1] + d1;
+
+            for (int x = 1; x < w - 1; x++)     // full mask
+            {
+                if (row1[x] > row0[x - 1] + d1)
+                    row1[x] = row0[x - 1] + d1;
+                if (row1[x] > row0[x    ] + d0)
+                    row1[x] = row0[x    ] + d0;
+                if (row1[x] > row0[x + 1] + d1)
+                    row1[x] = row0[x + 1] + d1;
+
+                if (row1[x] > row1[x - 1] + d0)
+                    row1[x] = row1[x - 1] + d0;
+            }
+
+            if (row1[w - 1] > row0[w - 2] + d1) // restricted mask for x=w-1
+                row1[w - 1] = row0[w - 2] + d1;
+            if (row1[w - 1] > row0[w - 1] + d0)
+                row1[w - 1] = row0[w - 1] + d0;
+
+            if (row1[w - 1] > row1[w - 2] + d0)
+                row1[w - 1] = row1[w - 2] + d0;
+
+            row0 = row1;
+        }
+
+        row0 = distances + h * w - w;
+
+        for (int x = w - 2; x >= 0; x--)        // restricted reverse mask for y=h-1
+            if (row0[x] > row0[x + 1] + d0)
+                row0[x] = row0[x + 1] + d0;
+
+        for (int y = h - 2; y >= 0; y--)
+        {
+            T* row1 = row0 - w;
+
+            if (row1[w - 1] > row0[w - 1] + d0) // restricted mask for x=w-1
+                row1[w - 1] = row0[w - 1] + d0;
+            if (row1[w - 1] > row0[w - 2] + d1)
+                row1[w - 1] = row0[w - 2] + d1;
+
+            for (int x = w - 2; x > 0; x--)     // full reverse mask
+            {
+                if (row1[x] > row0[x + 1] + d1)
+                    row1[x] = row0[x + 1] + d1;
+                if (row1[x] > row0[x    ] + d0)
+                    row1[x] = row0[x    ] + d0;
+                if (row1[x] > row0[x - 1] + d1)
+                    row1[x] = row0[x - 1] + d1;
+
+                if (row1[x] > row1[x + 1] + d0)
+                    row1[x] = row1[x + 1] + d0;
+            }
+
+            if (row1[0] > row0[1] + d1)         // restricted mask for x=0
+                row1[0] = row0[1] + d1;
+            if (row1[0] > row0[0] + d0)
+                row1[0] = row0[0] + d0;
+
+            if (row1[0] > row1[1] + d0)
+                row1[0] = row1[1] + d0;
+
+            row0 = row1;
+        }
+        
+        return d0;
+    }
+}
+
+int DOL::Chamfer(int w, int h, int16_t distances[])
+{
+    return ::Chamfer<int16_t>(w, h, distances);
+}
+
+int DOL::Chamfer(int w, int h, int32_t distances[])
+{
+    return ::Chamfer<int32_t>(w, h, distances);
+}
+
+namespace
+{
+    // "Distance Transforms of Sampled Functions", Felzenszwalb and Huttenlocher
+    // Uses parabolas to track distance. Is still O(n), and allows float-valued
+    // initial per-cell distance estimates, but the parabolas are still centred
+    // on the cell, which limits accuracy for higher-than-cell-resolution
+    // boundaries. Poor locality, is noticeably slower than the other O(n)
+    // algorithms unless everything is in cache.
+    void Felzenszwalb(float f[], int n, int v[/* n */], float z[/*n + 1*/])    // 1D version
+    {
+        int k = 0;
+
+        v[0] = 0;
+        z[0] = -FLT_MAX;
+        z[1] = +FLT_MAX;
+
+        for (int q = 1; q < n; q++)
+        {
+            float s  = ((f[q] + (q * q)) - (f[v[k]] + (v[k] * v[k]))) / (2 * q - 2 * v[k]);
+
+            while (s <= z[k])
+            {
+                k--;
+                s  = ((f[q] + (q * q)) - (f[v[k]] + (v[k] * v[k]))) / (2 * q - 2 * v[k]);
+            }
+
+            k++;
+            v[k] = q;
+            z[k] = s;
+            z[k+1] = +FLT_MAX;
+        }
+        
+        k = 0;
+        for (int q = 0; q < n; q++)
+        {
+            while (z[k + 1] < q)
+                k++;
+
+            f[q] = (q - v[k]) * (q - v[k]) + f[v[k]];
+        }
+    }
+}
+
+void DOL::Felzenszwalb(int w, int h, float distances[])
+{
+    int whMax = w >= h ? w : h;
+    float* f = new float[whMax];
+    int*   v = new int[whMax];
+    float* z = new float[whMax + 1];
+
+    // Transform along columns
+    for (int x = 0; x < w; x++)
+    {
+        for (int y = 0; y < h; y++)
+            f[y] = distances[x + y * w];
+
+        ::Felzenszwalb(f, h, v, z);
+
+        for (int y = 0; y < h; y++)
+            distances[x + y * w] = f[y];
+    }
+    
+    // transform along rows
+    for (int y = 0; y < h; y++)
+        ::Felzenszwalb(distances + y * w, w, v, z);
+    
+    delete[] z;
+    delete[] v;
+    delete[] f;
+}
+
+
+
+// Brute force -- for checking only!
+void DOL::BruteForce(int w, int h, cCellDelta2 deltas[], int cw)
+{
+    for (int i = 0; i < h; i++)
+        for (int j = 0; j < w; j++)
+        {
+            cCellDelta2* cell = deltas + i * w + j;
+
+            if (abs(cell->x) >= cw || abs(cell->y) >= cw)   // non-boundary cell?
+                continue;
+
+            // For each occupied cell, iterate over all other cells and check for minimal distance
+
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                {
+                    cCellDelta2 d2 = { int16_t((j - x) * cw + cell->x), int16_t((i - y) * cw + cell->y) };
+                    cCellDelta2* cell2 = deltas + y * w + x;
+
+                    if (Closer(*cell2, d2))
+                        *cell2 = d2;
+                }
+        }
+}
 
 // dirW is a w x h array of the fractional solid angle
 // obscured in one of the four quadrants we're sweeping over.
@@ -686,29 +1173,21 @@ namespace
 
 void DOL::OcclusionSweep(int w, int h, float dirW[])
 {
-    int sliceStride = w * h;
-    int lastRow = w * (h - 1);
-    
-    int sdx[4] = { +1, -1, +1, -1 };
-    int sdy[4] = { +1, +1, -1, -1 };
-    
-    int sib[2] = { 0, w - 1 };
-    int sie[2] = { w,    -1 };
-    
-    int rowStart[2] = { 0, lastRow };
+    const int sliceStride = w * h;
+    const int lastRow = w * (h - 1);
     
     for (int sweep = 0; sweep < 4; sweep++)
     {
-        const int dx = sdx[sweep];
-        const int dy = sdy[sweep];
-        
-        const int sweepX = (sweep >> 0) & 1;
-        const int sweepY = (sweep >> 1) & 1;
+        const int sx = (sweep >> 0) & 1;
+        const int sy = (sweep >> 1) & 1;
 
-        const int ib = sib[sweepX];
-        const int ie = sie[sweepX];
+        const int dx = 1 - 2 * sx;
+        const int dy = 1 - 2 * sy;
 
-        float* row0 = (dirW + sweep * sliceStride) + rowStart[sweepY];
+        const int ib =     sx * (w - 1);
+        const int ie = w - sx * (w + 1);
+
+        float* row0 = (dirW + sweep * sliceStride) + sy * lastRow;
         
         // do first row -- only depends on itself
         for (int i = ib + dx; i != ie; i += dx)
@@ -733,26 +1212,25 @@ void DOL::OcclusionSweep(int w, int h, float dirW[])
 
 // --- 3D Volumes --------------------------------------------------------------
 
-void DOL::CreateBitMask(int w, int h, int d, uint32_t seed, uint32_t mask[])
+uint32_t* DOL::CreateBitMask(int w, int h, int d)
 {
-    int scale = (seed >> 4);
-    seed &= 15;
-    
-    int count = (w + h + d) * (1 + scale);
+    size_t maskSize = MaskSize(w, h, d);
+    uint32_t* mask = new uint32_t[maskSize];
+
+    memset(mask, 0, maskSize * sizeof(uint32_t));
+
+    return mask;
+}
+
+void DOL::BitMaskAddPoints(int w, int h, int d, int count, uint32_t seed, uint32_t mask[])
+{
     int ws = MaskSize(w);
     
     for (int i = 0; i < count; i++)
     {
-        seed = NextSeed(seed);
-        int r = seed & ~0x80000000;
-
-        int s = r / w;
-        int t = s / h;
-        int u = t / d;
-        
-        int x = r - w * s;
-        int y = s - h * t;
-        int z = t - d * u;
+        int x = RNG(seed, w);
+        int y = RNG(seed, h);
+        int z = RNG(seed, d);
         
         assert(x < w);
         assert(y < h);
@@ -766,16 +1244,60 @@ void DOL::CreateBitMask(int w, int h, int d, uint32_t seed, uint32_t mask[])
     }
 }
 
-void DOL::InitDeltaFromBitMask(int w, int h, int d, const uint32_t mask[], cCellDelta3 delta[])
+namespace
+{
+    void FillMaskBlock(int rs, int ss, int x0, int x1, int y0, int y1, int z0, int z1, uint32_t mask[])
+    {
+        for (int z = z0; z <= z1; z++)
+        {
+            uint32_t* sliceMask = mask + z * ss;
+
+            FillMaskBlock(rs, x0, x1, y0, y1, sliceMask);
+        }
+    }
+}
+
+void DOL::BitMaskAddBlock(int w, int h, int d, int sides, uint32_t mask[])
+{
+    int sw = MaskSize(w);
+    int rowStride   = sw;
+    int sliceStride = sw * h;
+
+    int x0 = w / 4;
+    int x1 = x0 + w / 2 - 1;
+    int y0 = h / 3;
+    int y1 = y0 + h / 3 - 1;
+    int z0 = d / 3;
+    int z1 = z0 + d / 3 - 1;
+
+    if (sides > 6)
+        return FillMaskBlock(rowStride, sliceStride, x0, x1, y0, y1, z0, z1, mask);
+
+    if (sides > 0) // -Z
+        FillMaskBlock(rowStride, sliceStride, x0, x1, y0, y1, z0, z0, mask);
+    if (sides > 1) // -X
+        FillMaskBlock(rowStride, sliceStride, x0, x0, y0, y1, z0, z1, mask);
+    if (sides > 2) // -Y
+        FillMaskBlock(rowStride, sliceStride, x0, x1, y0, y0, z0, z1, mask);
+    if (sides > 3) // +X
+        FillMaskBlock(rowStride, sliceStride, x1, x1, y0, y1, z0, z1, mask);
+    if (sides > 4) // +Y
+        FillMaskBlock(rowStride, sliceStride, x0, x1, y1, y1, z0, z1, mask);
+    if (sides > 5) // +Z
+        FillMaskBlock(rowStride, sliceStride, x0, x1, y0, y1, z1, z1, mask);
+}
+
+void DOL::InitDeltasFromBitMask(int w, int h, int d, const uint32_t mask[], cCellDelta3 deltas[], bool invert)
 {
     cCellDelta3 maxDelta = { kMaxDelta3, kMaxDelta3, kMaxDelta3 };
     cCellDelta3 minDelta = { 0, 0, 0 };
     
     int s = w * h * d;
     for (int i = 0; i < s; i++)
-        delta[i] = maxDelta;
+        deltas[i] = maxDelta;
     
-    const int maskStride = MaskSize(w);
+    const int      maskStride = MaskSize(w);
+    const uint32_t allClear   = invert ? ~uint32_t(0) : 0;
     
     for (int z = 0; z < d; z++)
         for (int y = 0; y < h; y++)
@@ -783,19 +1305,872 @@ void DOL::InitDeltaFromBitMask(int w, int h, int d, const uint32_t mask[], cCell
             {
                 uint32_t m = (*mask++);
                 
-                if (m == 0)
+                if (m == allClear)
                     continue;
                 
-                cCellDelta3* block = delta + z * h * w + y * w + j;
-                
-                for (int i = 0; i < 32; i++)
+                cCellDelta3* block = deltas + z * h * w + y * w + j;
+                const int n = (w - j) > 32 ? 32 : (w - j);
+
+                for (int i = 0; i < n; i++)
                 {
-                    if (m & 1)
+                    if ((m & 1) ^ invert)
                         block[i] = minDelta;
                     
                     m >>= 1;
                 }
             }
+}
+
+namespace
+{
+    constexpr cCellDelta3 kB3W0 = { +1, 0, 0 };  // level set is half a cell right
+    constexpr cCellDelta3 kB3W1 = { -1, 0, 0 };  // level set is half a cell left
+    constexpr cCellDelta3 kB3H0 = { 0, +1, 0 };  // level set is half a cell up
+    constexpr cCellDelta3 kB3H1 = { 0, -1, 0 };  // level set is half a cell down
+    constexpr cCellDelta3 kB3D0 = { 0, 0, +1 };  // level set is half a cell in
+    constexpr cCellDelta3 kB3D1 = { 0, 0, -1 };  // level set is half a cell out
+
+#ifdef USE_BORDER_REFERENCE
+    void SetBorderCellsBC(int w, int h, int d, const uint32_t* const mask, cCellDelta3 deltas[])
+    {
+        int maskStride = MaskSize(w);
+        int maskSliceStride = MaskSize(w, h);
+        int stride = w;
+        int sliceStride = w * h;
+
+        for (int z = 0; z < d - 1; z++)
+        {
+            const uint32_t* maskSlice0  = mask   + (z + 0) * maskSliceStride;
+            const uint32_t* maskSlice1  = mask   + (z + 1) * maskSliceStride;
+
+            cCellDelta3* deltasSlice[2] = { deltas + (z + 0) * sliceStride, deltas + (z + 1) * sliceStride };
+        
+            const uint32_t* maskRow00   = maskSlice0;
+            const uint32_t* maskRow01   = maskSlice0 + maskStride;
+            const uint32_t* maskRow10   = maskSlice1;
+            const uint32_t* maskRow11   = maskSlice1 + maskStride;
+
+            cCellDelta3* rows[2][2] =
+            {
+                { deltasSlice[0], deltasSlice[0] + stride },
+                { deltasSlice[1], deltasSlice[1] + stride },
+            };
+
+            for (int y = 0; y < h - 1; y++)
+            {
+                cCellDelta3* block[2][2] =
+                {
+                    { rows[0][0] - 1, rows[0][1] - 1 },
+                    { rows[1][0] - 1, rows[1][1] - 1 },
+                };
+
+                uint32_t lastBit00 = maskRow00[0] & 1;
+                uint32_t lastBit01 = maskRow01[0] & 1;
+                uint32_t lastBit10 = maskRow10[0] & 1;
+                uint32_t lastBit11 = maskRow11[0] & 1;
+
+                for (int j = 0; j < maskStride; j++)
+                {
+                    // find all cells in 2x2 box (well, 32 shifted sets of them)
+                    uint32_t m000 = (maskRow00[j] << 1) | lastBit00;
+                    uint32_t m001 =  maskRow00[j];
+                    uint32_t m010 = (maskRow01[j] << 1) | lastBit01;
+                    uint32_t m011 =  maskRow01[j];
+                    uint32_t m100 = (maskRow10[j] << 1) | lastBit10;
+                    uint32_t m101 =  maskRow10[j];
+                    uint32_t m110 = (maskRow11[j] << 1) | lastBit11;
+                    uint32_t m111 =  maskRow11[j];
+
+                    lastBit00 = m001 >> 31;
+                    lastBit01 = m011 >> 31;
+                    lastBit10 = m101 >> 31;
+                    lastBit11 = m111 >> 31;
+
+                    uint32_t ex =  (m000 ^ m001);
+                    uint32_t ey =  (m000 ^ m010);
+                    uint32_t ez =  (m000 ^ m100);
+
+                    uint32_t ezx = (m001 ^ m101);
+                    uint32_t eyz = (m100 ^ m110);
+                    uint32_t exy = (m010 ^ m011);
+
+                    uint32_t fx = (ey ^ eyz); // set if we have a diagonal within x=0 face
+                    uint32_t fy = (ez ^ ezx);
+                    uint32_t fz = (ex ^ exy);
+                    
+                    uint32_t fzz = eyz ^ m101 ^ m111; // (m100 ^ m101 ^ m110 ^ m111);
+                    uint32_t bc = (fz ^ fzz); 
+                    
+                    if (bc)
+                    for (int i = 0; i < 32; i++)
+                    {
+                        if (j * 32 + i >= w)    // delayed check as we get here relatively rarely
+                            break;
+
+                        if (bc & (1 << i))    // necessary but not sufficient
+                        {
+                            int dx = (fx >> i) & 1;
+                            int dy = (fy >> i) & 1;
+                            int dz = (fz >> i) & 1;
+
+                            cCellDelta3& corner = block[dz][dy][dx + i];
+                            corner.x = 1 - 2 * dx;
+                            corner.y = 1 - 2 * dy;
+                            corner.z = 1 - 2 * dz;
+                        }
+
+                    }
+
+                    block[0][0] += 32;
+                    block[0][1] += 32;
+                    block[1][0] += 32;
+                    block[1][1] += 32;
+                }
+
+                maskRow00 += maskStride;
+                maskRow01 += maskStride;
+                maskRow10 += maskStride;
+                maskRow11 += maskStride;
+
+                rows[0][0] += stride;
+                rows[0][1] += stride;
+                rows[1][0] += stride;
+                rows[1][1] += stride;
+            }
+        }
+    }
+
+    void SetBorderCellsFCX(int w, int h, int d, const uint32_t* const mask, cCellDelta3 deltas[])
+    {
+        int maskStride = MaskSize(w);
+        int maskSliceStride = MaskSize(w, h);
+        int stride = w;
+        int sliceStride = w * h;
+
+        for (int z = 0; z < d - 1; z++)
+        {
+            const uint32_t* maskSlice0  = mask   + (z + 0) * maskSliceStride;
+            const uint32_t* maskSlice1  = mask   + (z + 1) * maskSliceStride;
+
+            cCellDelta3* deltasSlice[2] = { deltas + (z + 0) * sliceStride, deltas + (z + 1) * sliceStride };
+        
+            const uint32_t* maskRow00   = maskSlice0;
+            const uint32_t* maskRow01   = maskSlice0 + maskStride;
+            const uint32_t* maskRow10   = maskSlice1;
+            const uint32_t* maskRow11   = maskSlice1 + maskStride;
+
+            cCellDelta3* rows[2][2] =
+            {
+                { deltasSlice[0], deltasSlice[0] + stride },
+                { deltasSlice[1], deltasSlice[1] + stride },
+            };
+
+            for (int y = 0; y < h - 1; y++)
+            {
+                cCellDelta3* block[2][2] =
+                {
+                    { rows[0][0], rows[0][1] },
+                    { rows[1][0], rows[1][1] },
+                };
+
+                for (int j = 0; j < maskStride; j++)
+                {
+                    // find all cells in 2x2 box (well, 32 shifted sets of them)
+                    uint32_t m000 = maskRow00[j];
+                    uint32_t m010 = maskRow01[j];
+                    uint32_t m100 = maskRow10[j];
+                    uint32_t m110 = maskRow11[j];
+
+                    uint32_t ey =  (m000 ^ m010);
+                    uint32_t ez =  (m000 ^ m100);
+
+                    uint32_t eyz = (m100 ^ m110);
+
+                    uint32_t fx = (ey ^ eyz); // set if we have a diagonal within x=0 face
+
+                    if (fx)
+                    for (int i = 0; i < 32; i++)
+                    {
+                        if (j * 32 + i >= w)    // delayed check as we get here relatively rarely
+                            break;
+
+                        if (fx & (1 << i))
+                        {
+                            int dy = (ez >> i) & 1;
+                            int dz = (ey >> i) & 1;
+
+                            cCellDelta3& corner = block[dz][dy][i];
+                            corner.x = 0;
+                            corner.y = 1 - 2 * dy;
+                            corner.z = 1 - 2 * dz;
+                        }
+                    }
+
+                    block[0][0] += 32;
+                    block[0][1] += 32;
+                    block[1][0] += 32;
+                    block[1][1] += 32;
+                }
+
+                maskRow00 += maskStride;
+                maskRow01 += maskStride;
+                maskRow10 += maskStride;
+                maskRow11 += maskStride;
+
+                rows[0][0] += stride;
+                rows[0][1] += stride;
+                rows[1][0] += stride;
+                rows[1][1] += stride;
+            }
+        }
+    }
+
+    void SetBorderCellsFCY(int w, int h, int d, const uint32_t* const mask, cCellDelta3 deltas[])
+    {
+        int maskStride = MaskSize(w);
+        int maskSliceStride = MaskSize(w, h);
+        int stride = w;
+        int sliceStride = w * h;
+
+        for (int z = 0; z < d - 1; z++)
+        {
+            const uint32_t* maskSlice0  = mask   + (z + 0) * maskSliceStride;
+            const uint32_t* maskSlice1  = mask   + (z + 1) * maskSliceStride;
+
+            cCellDelta3* deltasSlice[2] = { deltas + (z + 0) * sliceStride, deltas + (z + 1) * sliceStride };
+        
+            const uint32_t* maskRow00   = maskSlice0;
+            const uint32_t* maskRow10   = maskSlice1;
+
+            cCellDelta3* rows[2] =
+            {
+                deltasSlice[0],
+                deltasSlice[1],
+            };
+
+            for (int y = 0; y < h; y++)
+            {
+                cCellDelta3* block[2] =
+                {
+                    rows[0] - 1,
+                    rows[1] - 1,
+                };
+
+                uint32_t lastBit00 = maskRow00[0] & 1;
+                uint32_t lastBit10 = maskRow10[0] & 1;
+
+                for (int j = 0; j < maskStride; j++)
+                {
+                    // find all cells in 2x2 box (well, 32 shifted sets of them)
+                    uint32_t m000 = (maskRow00[j] << 1) | lastBit00;
+                    uint32_t m001 =  maskRow00[j];
+                    uint32_t m100 = (maskRow10[j] << 1) | lastBit10;
+                    uint32_t m101 =  maskRow10[j];
+
+                    lastBit00 = m001 >> 31;
+                    lastBit10 = m101 >> 31;
+
+                    uint32_t ex =  (m000 ^ m001);
+                    uint32_t ez =  (m000 ^ m100);
+                    uint32_t ezx = (m001 ^ m101);
+
+                    uint32_t fy = (ez ^ ezx);
+
+                    if (fy)
+                    for (int i = 0; i < 32; i++)
+                    {
+                        if (j * 32 + i >= w)    // delayed check as we get here relatively rarely
+                            break;
+
+                        if (fy & (1 << i))
+                        {
+                            int dx = (ez >> i) & 1;
+                            int dz = (ex >> i) & 1;
+
+                            cCellDelta3& corner = block[dz][dx + i];
+                            corner.x = 1 - 2 * dx;
+                            corner.y = 0;
+                            corner.z = 1 - 2 * dz;
+                        }
+                    }
+
+                    block[0] += 32;
+                    block[1] += 32;
+                }
+
+                maskRow00 += maskStride;
+                maskRow10 += maskStride;
+
+                rows[0] += stride;
+                rows[1] += stride;
+            }
+        }
+    }
+
+    void SetBorderCellsFCZ(int w, int h, int d, const uint32_t* const mask, cCellDelta3 deltas[])
+    {
+        int maskStride = MaskSize(w);
+        int maskSliceStride = MaskSize(w, h);
+        int stride = w;
+        int sliceStride = w * h;
+
+        for (int z = 0; z < d; z++)
+        {
+            const uint32_t* maskSlice = mask + z * maskSliceStride;
+            cCellDelta3* deltasSlice = deltas + z * sliceStride;
+        
+            const uint32_t* maskRow00 = maskSlice;
+            const uint32_t* maskRow01 = maskSlice + maskStride;
+
+            cCellDelta3* rows[2] = { deltasSlice, deltasSlice + stride };
+
+            for (int y = 0; y < h - 1; y++)
+            {
+                cCellDelta3* block[2] = { rows[0] - 1, rows[1] - 1 };
+
+                uint32_t lastBit00 = maskRow00[0] & 1;
+                uint32_t lastBit01 = maskRow01[0] & 1;
+
+                for (int j = 0; j < maskStride; j++)
+                {
+                    // find all cells in 2x2 box (well, 32 shifted sets of them)
+                    uint32_t m000 = (maskRow00[j] << 1) | lastBit00;
+                    uint32_t m001 =  maskRow00[j];
+                    uint32_t m010 = (maskRow01[j] << 1) | lastBit01;
+                    uint32_t m011 =  maskRow01[j];
+
+                    lastBit00 = m001 >> 31;
+                    lastBit01 = m011 >> 31;
+
+                    uint32_t ex =  (m000 ^ m001);
+                    uint32_t ey =  (m000 ^ m010);
+                    uint32_t exy = (m010 ^ m011);
+
+                    uint32_t fz = (ex ^ exy);
+                    
+                    if (fz)
+                    for (int i = 0; i < 32; i++)
+                    {
+                        if (j * 32 + i >= w)    // delayed check as we get here relatively rarely
+                            break;
+
+                        if (fz & (1 << i))
+                        {
+                            int dx = (ey >> i) & 1;
+                            int dy = (ex >> i) & 1;
+
+                            cCellDelta3& corner = block[dy][dx + i];
+                            corner.x = 1 - 2 * dx;
+                            corner.y = 1 - 2 * dy;
+                            corner.z = 0;
+                        }
+                    }
+
+                    block[0] += 32;
+                    block[1] += 32;
+                }
+
+                maskRow00 += maskStride;
+                maskRow01 += maskStride;
+
+                rows[0] += stride;
+                rows[1] += stride;
+            }
+        }
+    }
+
+    void SetBorderCellsD(int w, int h, int d, const uint32_t* const mask, cCellDelta3 deltas[])
+    {
+        // Do depth edges...
+        int maskStride = MaskSize(w);
+        int maskSliceStride = MaskSize(w, h);
+
+        for (int z = 0; z < d - 1; z++)
+            for (int y = 0; y < h; y++)
+            {
+                const uint32_t* maskRow0   = mask   + (z + 0) * maskSliceStride + y * maskStride;
+                const uint32_t* maskRow1   = mask   + (z + 1) * maskSliceStride + y * maskStride;
+                cCellDelta3*    deltasRow0 = deltas + (z + 0) * w * h + y * w;
+                cCellDelta3*    deltasRow1 = deltas + (z + 1) * w * h + y * w;
+
+                for (int j = 0; j < maskStride; j++)
+                {
+                    uint32_t m0 = maskRow0[j];
+                    uint32_t m1 = maskRow1[j];
+                    uint32_t mx = m0 ^ m1;  // 1 on change
+
+                    if (mx)
+                    {
+                        cCellDelta3* block0 = deltasRow0 + j * 32;
+                        cCellDelta3* block1 = deltasRow1 + j * 32;
+
+                        for (int i = 0; i < 32; i++)
+                            if (mx & (1 << i))
+                            {
+                                if (j * 32 + i >= w)    // delayed check as we get here relatively rarely
+                                    break;
+
+                                assert(j * 32 + i < w);
+
+                                block0[i] = kB3D0;
+                                block1[i] = kB3D1;
+                            }
+                    }
+                }
+            }
+    }
+
+    void SetBorderCellsH(int w, int h, int d, const uint32_t* const mask, cCellDelta3 deltas[])
+    {
+        int maskStride = MaskSize(w);
+        int maskSliceStride = MaskSize(w, h);
+
+        for (int z = 0; z < d; z++)
+        {
+            const uint32_t* maskSlice  = mask   + z * maskSliceStride;
+            cCellDelta3*    deltaSlice = deltas + z * (w * h);
+
+            // Do horizontal edges...
+
+            for (int y = 0; y < h - 1; y++)
+            {
+                const uint32_t* maskRow0   = maskSlice  + (y + 0) * maskStride;
+                const uint32_t* maskRow1   = maskSlice  + (y + 1) * maskStride;
+                cCellDelta3*    deltasRow0 = deltaSlice + (y + 0) * w;
+                cCellDelta3*    deltasRow1 = deltaSlice + (y + 1) * w;
+
+                for (int j = 0; j < maskStride; j++)
+                {
+                    uint32_t m0 = maskRow0[j];
+                    uint32_t m1 = maskRow1[j];
+                    uint32_t mx = m0 ^ m1;  // 1 on change
+
+                    if (mx)
+                    {
+                        cCellDelta3* block0 = deltasRow0 + j * 32;
+                        cCellDelta3* block1 = deltasRow1 + j * 32;
+
+                        for (int i = 0; i < 32; i++)
+                            if (mx & (1 << i))
+                            {
+                                if (j * 32 + i >= w)    // delayed check as we get here relatively rarely
+                                    break;
+
+                                assert(j * 32 + i < w);
+
+                                block0[i] = kB3H0;
+                                block1[i] = kB3H1;
+                            }
+                    }
+                }
+            }
+        }
+    }
+    
+    void SetBorderCellsW(int w, int h, int d, const uint32_t* const mask, cCellDelta3 deltas[])
+    {
+        int maskStride = MaskSize(w);
+        int maskSliceStride = MaskSize(w, h);
+        
+        for (int z = 0; z < d; z++)
+        {
+            const uint32_t* maskSlice  = mask   + maskSliceStride * z;
+            cCellDelta3*    deltaSlice = deltas + w * h * z;
+
+            // Do vertical edges...
+
+            for (int y = 0; y < h; y++)
+            {
+                const uint32_t* maskRow   = maskSlice  + y * maskStride;
+                cCellDelta3*    deltasRow = deltaSlice + y * w;
+                
+                uint32_t lastBit = maskRow[0] & 1;
+
+                for (int j = 0; j < maskStride; j++)
+                {
+                    uint32_t m0 = maskRow[j];
+                    uint32_t m1 = (m0 << 1) | lastBit;
+                    lastBit = m0 >> 31;
+
+                    uint32_t mx = m0 ^ m1;
+
+                    if (mx)
+                    {
+                        cCellDelta3* block = deltasRow + j * 32;
+
+                        for (int i = 0; i < 32; i++)
+                            if (mx & (1 << i))
+                            {
+                                if (j * 32 + i >= w)    // delayed check as we get here relatively rarely
+                                    break;
+
+                                assert(j * 32 + i > 0);
+                                assert(j * 32 + i < w);
+
+                                block[i - 1] = kB3W0;
+                                block[i + 0] = kB3W1;
+                            }
+                    }
+                }
+            }
+        }
+    }
+
+#else
+
+    void SetBorderCellsCombo(int w, int h, int d, const uint32_t* const mask, cCellDelta3 deltas[])
+    {
+        // Do depth edges...
+        int maskStride = MaskSize(w);
+        int maskSliceStride = MaskSize(w, h);
+        int stride = w;
+        int sliceStride = w * h;
+
+        for (int z = 0; z < d - 1; z++)
+        {
+            const uint32_t* maskSlice0  = mask   + (z + 0) * maskSliceStride;
+            const uint32_t* maskSlice1  = mask   + (z + 1) * maskSliceStride;
+
+            cCellDelta3* deltasSlice[2] = { deltas + (z + 0) * sliceStride, deltas + (z + 1) * sliceStride };
+        
+            const uint32_t* maskRow00   = maskSlice0;
+            const uint32_t* maskRow01   = maskSlice0 + maskStride;
+            const uint32_t* maskRow10   = maskSlice1;
+            const uint32_t* maskRow11   = maskSlice1 + maskStride;
+
+            cCellDelta3* rows[2][2] =
+            {
+                { deltasSlice[0], deltasSlice[0] + stride },
+                { deltasSlice[1], deltasSlice[1] + stride },
+            };
+
+            for (int y = 0; y < h - 1; y++)
+            {
+                cCellDelta3* block[2][2] =
+                {
+                    { rows[0][0] - 1, rows[0][1] - 1 },
+                    { rows[1][0] - 1, rows[1][1] - 1 },
+                };
+
+                uint32_t lastBit00 = maskRow00[0] & 1;
+                uint32_t lastBit01 = maskRow01[0] & 1;
+                uint32_t lastBit10 = maskRow10[0] & 1;
+                uint32_t lastBit11 = maskRow11[0] & 1;
+
+                for (int j = 0; j < maskStride; j++)
+                {
+                    // find all cells in 2x2 box (well, 32 shifted sets of them)
+                    uint32_t m000 = (maskRow00[j] << 1) | lastBit00;
+                    uint32_t m001 =  maskRow00[j];
+                    uint32_t m010 = (maskRow01[j] << 1) | lastBit01;
+                    uint32_t m011 =  maskRow01[j];
+                    uint32_t m100 = (maskRow10[j] << 1) | lastBit10;
+                    uint32_t m101 =  maskRow10[j];
+                    uint32_t m110 = (maskRow11[j] << 1) | lastBit11;
+                    uint32_t m111 =  maskRow11[j];
+
+                    lastBit00 = m001 >> 31;
+                    lastBit01 = m011 >> 31;
+                    lastBit10 = m101 >> 31;
+                    lastBit11 = m111 >> 31;
+
+                    uint32_t ex =  (m000 ^ m001);
+                    uint32_t ey =  (m000 ^ m010);
+                    uint32_t ez =  (m000 ^ m100);
+
+                    uint32_t ezx = (m001 ^ m101);
+                    uint32_t eyz = (m100 ^ m110);
+                    uint32_t exy = (m010 ^ m011);
+
+                    uint32_t fx = (ey ^ eyz); // set if we have a diagonal within x=0 face
+                    uint32_t fy = (ez ^ ezx);
+                    uint32_t fz = (ex ^ exy);
+
+                    uint32_t eyx  = (m001 ^ m011);
+                    uint32_t eyxz = (m101 ^ m111);
+                    
+                    uint32_t fxx = eyx ^ eyxz;
+
+                    uint32_t fzz = eyz ^ eyxz;
+                    uint32_t bc = (fz ^ fzz);       // Necessary but not sufficient, we're just checking z=0 has three cells the same vs z=1 doesn't (or vice versa). Incorrectly identified box corners will always be overwritten however.  
+
+                    // if (ex | ey | ez | fxx | fy | fz | bc) {   early out makes no appreciable difference
+                    {
+                        // The order here is important as iterating over the masks destroys them
+                        ITER_SET_BITS_BEGIN(bc)
+                            assert(j * 32 + i > 0);
+
+                            int dx = (fx >> i) & 1;
+                            int dy = (fy >> i) & 1;
+                            int dz = (fz >> i) & 1;
+
+                            cCellDelta3& corner = block[dz][dy][dx + i];
+                            if (corner.x == kMaxDelta3)
+                            {
+                                corner.x = 1 - 2 * dx;
+                                corner.y = 1 - 2 * dy;
+                                corner.z = 1 - 2 * dz;
+                            }
+                        }
+
+                        ITER_SET_BITS_BEGIN(fxx)
+                            int dy = (ezx >> i) & 1;
+                            int dz = (eyx >> i) & 1;
+
+                            cCellDelta3& corner = block[dz][dy][1 + i];
+                            if (corner.x == kMaxDelta3 || (abs(corner.x) + abs(corner.y) + abs(corner.z) > 1))
+                            {
+                                corner.x = 0;
+                                corner.y = 1 - 2 * dy;
+                                corner.z = 1 - 2 * dz;
+                            }
+                        ITER_SET_BITS_END
+
+                        ITER_SET_BITS_BEGIN(fy)
+                            assert(j * 32 + i > 0);
+
+                            int dx = (ez >> i) & 1;
+                            int dz = (ex >> i) & 1;
+
+                            cCellDelta3& corner = block[dz][0][dx + i];
+                            if (corner.x == kMaxDelta3 || (abs(corner.x) + abs(corner.y) + abs(corner.z) > 1))
+                            {
+                                corner.x = 1 - 2 * dx;
+                                corner.y = 0;
+                                corner.z = 1 - 2 * dz;
+                            }
+                        ITER_SET_BITS_END
+
+                        ITER_SET_BITS_BEGIN(fz)
+                            assert(j * 32 + i > 0);
+
+                            int dx = (ey >> i) & 1;
+                            int dy = (ex >> i) & 1;
+
+                            cCellDelta3& corner = block[0][dy][dx + i];
+                            if (corner.x == kMaxDelta3 || (abs(corner.x) + abs(corner.y) + abs(corner.z) > 1))
+                            {
+                                corner.x = 1 - 2 * dx;
+                                corner.y = 1 - 2 * dy;
+                                corner.z = 0;
+                            }
+                        ITER_SET_BITS_END
+
+                        ITER_SET_BITS_BEGIN(ex)
+                            assert(j * 32 + i > 0);
+
+                            block[0][0][i + 0] = kB3W0;
+                            block[0][0][i + 1] = kB3W1;
+                        ITER_SET_BITS_END
+
+                        ITER_SET_BITS_BEGIN(eyx)
+                            block[0][0][i + 1] = kB3H0;
+                            block[0][1][i + 1] = kB3H1;
+                        ITER_SET_BITS_END
+
+                        ITER_SET_BITS_BEGIN (ezx)
+                            block[0][0][i + 1] = kB3D0;
+                            block[1][0][i + 1] = kB3D1;
+                        ITER_SET_BITS_END
+                    }
+
+                    block[0][0] += 32;
+                    block[0][1] += 32;
+                    block[1][0] += 32;
+                    block[1][1] += 32;
+                }
+
+                maskRow00 += maskStride;
+                maskRow01 += maskStride;
+                maskRow10 += maskStride;
+                maskRow11 += maskStride;
+
+                rows[0][0] += stride;
+                rows[0][1] += stride;
+                rows[1][0] += stride;
+                rows[1][1] += stride;
+            }
+
+            // do last fy without everything else
+            {
+                cCellDelta3* block[2] =
+                {
+                    rows[0][0] - 1,
+                    rows[1][0] - 1,
+                };
+
+                uint32_t lastBit00 = maskRow00[0] & 1;
+                uint32_t lastBit10 = maskRow10[0] & 1;
+
+                for (int j = 0; j < maskStride; j++)
+                {
+                    uint32_t m000 = (maskRow00[j] << 1) | lastBit00;
+                    uint32_t m001 =  maskRow00[j];
+                    uint32_t m100 = (maskRow10[j] << 1) | lastBit10;
+                    uint32_t m101 =  maskRow10[j];
+
+                    lastBit00 = m001 >> 31;
+                    lastBit10 = m101 >> 31;
+
+                    uint32_t ex =  (m000 ^ m001);
+                    uint32_t ez =  (m000 ^ m100);
+                    uint32_t ezx = (m001 ^ m101);
+
+                    uint32_t fy = (ez ^ ezx);
+                    
+                    ITER_SET_BITS_BEGIN(fy)
+                        assert(j * 32 + i > 0);
+
+                        int dx = (ez >> i) & 1;
+                        int dz = (ex >> i) & 1;
+
+                        cCellDelta3& corner = block[dz][dx + i];
+                        if (corner.x == kMaxDelta3 || (abs(corner.x) + abs(corner.y) + abs(corner.z) > 1))
+                        {
+                            corner.x = 1 - 2 * dx;
+                            corner.y = 0;
+                            corner.z = 1 - 2 * dz;
+                        }
+                    ITER_SET_BITS_END
+
+                    ITER_SET_BITS_BEGIN(ex)
+                        assert(j * 32 + i > 0);
+
+                        block[0][i + 0] = kB3W0;
+                        block[0][i + 1] = kB3W1;
+                    ITER_SET_BITS_END
+
+                    ITER_SET_BITS_BEGIN(ezx)
+                        block[0][i + 1] = kB3D0;
+                        block[1][i + 1] = kB3D1;
+                    ITER_SET_BITS_END
+
+                    block[0] += 32;
+                    block[1] += 32;
+                }
+            }
+        }
+        
+        // Now for the last slice, do the fz faces, and ex/ey edges
+        {
+            int z = d - 1;
+            const uint32_t* maskSlice0  = mask   + z * maskSliceStride;
+            cCellDelta3*    deltasSlice = deltas + z * sliceStride;
+        
+            const uint32_t* maskRow00   = maskSlice0;
+            const uint32_t* maskRow01   = maskSlice0 + maskStride;
+
+            cCellDelta3* rows[2] = { deltasSlice, deltasSlice + stride };
+
+            for (int y = 0; y < h - 1; y++)
+            {
+                cCellDelta3* block[2] = { rows[0] - 1, rows[1] - 1 };
+
+                uint32_t lastBit00 = maskRow00[0] & 1;
+                uint32_t lastBit01 = maskRow01[0] & 1;
+
+                for (int j = 0; j < maskStride; j++)
+                {
+                    uint32_t m000 = (maskRow00[j] << 1) | lastBit00;
+                    uint32_t m001 =  maskRow00[j];
+                    uint32_t m010 = (maskRow01[j] << 1) | lastBit01;
+                    uint32_t m011 =  maskRow01[j];
+
+                    lastBit00 = m001 >> 31;
+                    lastBit01 = m011 >> 31;
+
+                    uint32_t ex =  (m000 ^ m001);
+                    uint32_t ey =  (m000 ^ m010);
+                    uint32_t eyx = (m001 ^ m011);
+
+                    uint32_t fz = ey ^ eyx;
+
+                    ITER_SET_BITS_BEGIN(fz)
+                        assert(j * 32 + i > 0);
+
+                        int dx = (ey >> i) & 1;
+                        int dy = (ex >> i) & 1;
+
+                        assert(i != 0 || j != 0 || dx != 0);
+
+                        cCellDelta3& corner = block[dy][dx + i];
+                        if (corner.x == kMaxDelta3 || (abs(corner.x) + abs(corner.y) + abs(corner.z) > 1))
+                        {
+                            corner.x = 1 - 2 * dx;
+                            corner.y = 1 - 2 * dy;
+                            corner.z = 0;
+                        }
+                    ITER_SET_BITS_END
+
+                    ITER_SET_BITS_BEGIN(ex)
+                        assert(j * 32 + i > 0);
+
+                        block[0][i + 0] = kB3W0;
+                        block[0][i + 1] = kB3W1;
+                    ITER_SET_BITS_END
+
+                    ITER_SET_BITS_BEGIN(eyx)
+                        block[0][i + 1] = kB3H0;
+                        block[1][i + 1] = kB3H1;
+                    ITER_SET_BITS_END
+
+                    block[0] += 32;
+                    block[1] += 32;
+                }
+
+                maskRow00 += maskStride;
+                maskRow01 += maskStride;
+
+                rows[0] += stride;
+                rows[1] += stride;
+            }
+            
+            // do last ex without everything else
+            cCellDelta3* block = rows[0] - 1;
+            uint32_t lastBit00 = maskRow00[0] & 1;
+
+            for (int j = 0; j < maskStride; j++)
+            {
+                uint32_t m000 = (maskRow00[j] << 1) | lastBit00;
+                uint32_t m001 =  maskRow00[j];
+
+                lastBit00 = m001 >> 31;
+
+                uint32_t ex =  (m000 ^ m001);
+
+                ITER_SET_BITS_BEGIN(ex)
+                    assert(j * 32 + i > 0);
+
+                    block[i + 0] = kB3W0;
+                    block[i + 1] = kB3W1;
+                ITER_SET_BITS_END
+
+                block += 32;
+            }
+        }
+    }
+#endif
+}
+
+void DOL::InitBorderDeltasFromBitMask(int w, int h, int d, const uint32_t mask[], cCellDelta3 deltas[])
+{
+    const cCellDelta3 maxDelta = { kMaxDelta3, kMaxDelta3, kMaxDelta3 };
+
+    int s = w * h * d;
+    for (int i = 0; i < s; i++)
+        deltas[i] = maxDelta;
+
+#ifdef USE_BORDER_REFERENCE
+    SetBorderCellsBC (w, h, d, mask, deltas);
+    SetBorderCellsFCZ(w, h, d, mask, deltas);
+    SetBorderCellsFCY(w, h, d, mask, deltas);
+    SetBorderCellsFCX(w, h, d, mask, deltas);
+    SetBorderCellsD  (w, h, d, mask, deltas);
+    SetBorderCellsH  (w, h, d, mask, deltas);
+    SetBorderCellsW  (w, h, d, mask, deltas);
+#else
+    SetBorderCellsCombo(w, h, d, mask, deltas);
+#endif
 }
 
 namespace
@@ -807,202 +2182,68 @@ namespace
         
         return dw0 > dw1;
     }
-
-    void Danielsson2(int w, int h, cCellDelta3 delta[])
-    {
-        cCellDelta3* row0 = delta;
-        cCellDelta3 cell;
-            
-        for (int j = 1; j < h; j++)
-        {
-            cCellDelta3* row1 = row0 + w;
-            
-            for (int i = 0; i < w; i++)
-            {
-                cell.x = row0[i].x;
-                cell.y = row0[i].y - 1;
-                cell.z = row0[i].z;
-                
-                if (Closer(row1[i], cell))
-                    row1[i] = cell;
-            }
-            
-            for (int i = 1; i < w; i++)
-            {
-                cell.x = row1[i - 1].x - 1;
-                cell.y = row1[i - 1].y;
-                cell.z = row1[i - 1].z;
-                
-                if (Closer(row1[i], cell))
-                    row1[i] = cell;
-            }
-
-            for (int i = w - 2; i >= 0; i--)
-            {
-
-                cell.x = row1[i + 1].x + 1;
-                cell.y = row1[i + 1].y;
-                cell.z = row1[i + 1].z;
-                
-                if (Closer(row1[i], cell))
-                    row1[i] = cell;
-            }
-            
-            row0 = row1;
-        }
-        
-        row0 = delta + h * w - w;
-        
-        for (int j = h - 1; j > 0; j--)
-        {
-            cCellDelta3* row1 = row0 - w;
-            
-            for (int i = 0; i < w; i++)
-            {
-                cell.x = row0[i].x;
-                cell.y = row0[i].y + 1;
-                cell.z = row0[i].z;
-                
-                if (Closer(row1[i], cell))
-                    row1[i] = cell;
-            }
-            
-            for (int i = 1; i < w; i++)
-            {
-                cell.x = row1[i - 1].x - 1;
-                cell.y = row1[i - 1].y;
-                cell.z = row1[i - 1].z;
-                
-                if (Closer(row1[i], cell))
-                    row1[i] = cell;
-            }
-            
-            for (int i = w - 2; i >= 0; i--)
-            {
-                cell.x = row1[i + 1].x + 1;
-                cell.y = row1[i + 1].y;
-                cell.z = row1[i + 1].z;
-                
-                if (Closer(row1[i], cell))
-                    row1[i] = cell;
-            }
-            
-            row0 = row1;
-        }
-    }
 }
 
-void DOL::Danielsson(int w, int h, int d, cCellDelta3 delta[])
-{
-    int sliceStride = w * h;
-    
-    cCellDelta3* slice0 = delta;
-    cCellDelta3 cell;
-    
-    for (int k = 1; k < d; k++)
-    {
-        cCellDelta3* slice1 = slice0 + sliceStride;
-        
-        for (int i = 0; i < sliceStride; i++)
-        {
-            cell.x = slice0[i].x;
-            cell.y = slice0[i].y;
-            cell.z = slice0[i].z - 1;
-            
-            if (Closer(slice1[i], cell))
-                slice1[i] = cell;
-        }
-
-        Danielsson2(w, h, slice1);
-        
-        slice0 = slice1;
-    }
-
-    slice0 = delta + sliceStride * (d - 1);
-    
-    for (int k = d - 2; k >= 0; k--)
-    {
-        cCellDelta3* slice1 = slice0 - sliceStride;
-        
-        for (int i = 0; i < sliceStride; i++)
-        {
-            cell.x = slice0[i].x;
-            cell.y = slice0[i].y;
-            cell.z = slice0[i].z + 1;
-            
-            if (Closer(slice1[i], cell))
-                slice1[i] = cell;
-        }
-        
-        Danielsson2(w, h, slice1);
-        
-        slice0 = slice1;
-    }
-}
-
-
-void DOL::FastSweep(int w, int h, int d, cCellDelta3 delta[])
+void DOL::FastSweep(int w, int h, int d, cCellDelta3 deltas[], int cw)
 {
     // Fast sweep approach -- sweep each diagonal in turn.
     // C B
     // A x
-    int sliceStride = w * h;
-    int lastRow = w * (h - 1);
-    
-    int sdx[8] = { +1, -1, +1, -1, +1, -1, +1, -1 };
-    int sdy[8] = { +1, +1, -1, -1, +1, +1, -1, -1 };
-    int sdz[8] = { +1, +1, +1, +1, -1, -1, -1, -1 };
-    
-    int ib[2] = { 0, w - 1 };
-    int ie[2] = { w,    -1 };
-    
-    int rowStart[2] = { 0, lastRow };
-    
+    const int sliceStride = w * h;
+    const int lastRow = w * (h - 1);
+
     for (int sweep = 0; sweep < 8; sweep++)
     {
-        const int dx = sdx[sweep];
-        const int dy = sdy[sweep];
-        const int dz = sdz[sweep];
-        
-        const int sweepX = (sweep >> 0) & 1;
-        const int sweepY = (sweep >> 1) & 1;
-        const int sweepZ = (sweep >> 2) & 1;
-        
-        cCellDelta3* slice0 = delta + sweepZ * (d - 1) * sliceStride;
+        const int sx = (sweep >> 0) & 1;
+        const int sy = (sweep >> 1) & 1;
+        const int sz = (sweep >> 2) & 1;
+
+        const int dx = 1 - 2 * sx;
+        const int dy = 1 - 2 * sy;
+        const int dz = 1 - 2 * sz;
+
+        const int cx = -cw * dx;
+        const int cy = -cw * dy;
+        const int cz = -cw * dz;
+
+        const int ib =     sx * (w - 1);
+        const int ie = w - sx * (w + 1);
+
+        cCellDelta3* slice0 = deltas + sz * (d - 1) * sliceStride;
         cCellDelta3 cell;
 
         for (int k = 1; k < d; k++)
         {
             cCellDelta3* slice1 = slice0 + sliceStride * dz;
             
-            cCellDelta3* row00 = slice0 + rowStart[sweepY];
-            cCellDelta3* row01 = slice1 + rowStart[sweepY];
+            cCellDelta3* row00 = slice0 + sy * lastRow;
+            cCellDelta3* row01 = slice1 + sy * lastRow;
             
             for (int j = 1; j < h; j++)
             {
                 cCellDelta3* row10 = row00 + w * dy;
                 cCellDelta3* row11 = row01 + w * dy;
             
-                for (int i = ib[sweepX]; i != ie[sweepX]; i += dx)
+                for (int i = ib; i != ie; i += dx)
                 {
                     cell.x = row10[i].x;
                     cell.y = row10[i].y;
-                    cell.z = row10[i].z - dz;
+                    cell.z = row10[i].z + cz;
                     
                     if (Closer(row11[i], cell))
                         row11[i] = cell;
 
                     cell.x = row01[i].x;
-                    cell.y = row01[i].y - dy;
+                    cell.y = row01[i].y + cy;
                     cell.z = row01[i].z;
                     
                     if (Closer(row11[i], cell))
                         row11[i] = cell;
                 }
 
-                for (int i = ib[sweepX] + dx; i != ie[sweepX]; i += dx)
+                for (int i = ib + dx; i != ie; i += dx)
                 {
-                    cell.x = row11[i - dx].x - dx;
+                    cell.x = row11[i - dx].x + cx;
                     cell.y = row11[i - dx].y;
                     cell.z = row11[i - dx].z;
                     
@@ -1019,25 +2260,236 @@ void DOL::FastSweep(int w, int h, int d, cCellDelta3 delta[])
     }
 }
 
+namespace
+{
+    void DanielssonSlice(int w, int h, cCellDelta3 deltas[], int cw)
+    {
+        cCellDelta3* row0 = deltas;
+        cCellDelta3 cell;
+
+        for (int j = 1; j < h; j++)
+        {
+            cCellDelta3* row1 = row0 + w;
+
+            for (int i = 0; i < w; i++)
+            {
+                cell.x = row0[i].x;
+                cell.y = row0[i].y - cw;
+                cell.z = row0[i].z;
+
+                if (Closer(row1[i], cell))
+                    row1[i] = cell;
+            }
+
+            for (int i = 1; i < w; i++)
+            {
+                cell.x = row1[i - 1].x - cw;
+                cell.y = row1[i - 1].y;
+                cell.z = row1[i - 1].z;
+
+                if (Closer(row1[i], cell))
+                    row1[i] = cell;
+            }
+
+            for (int i = w - 2; i >= 0; i--)
+            {
+
+                cell.x = row1[i + 1].x + cw;
+                cell.y = row1[i + 1].y;
+                cell.z = row1[i + 1].z;
+
+                if (Closer(row1[i], cell))
+                    row1[i] = cell;
+            }
+
+            row0 = row1;
+        }
+
+        row0 = deltas + h * w - w;
+
+        for (int j = h - 1; j > 0; j--)
+        {
+            cCellDelta3* row1 = row0 - w;
+
+            for (int i = 0; i < w; i++)
+            {
+                cell.x = row0[i].x;
+                cell.y = row0[i].y + cw;
+                cell.z = row0[i].z;
+
+                if (Closer(row1[i], cell))
+                    row1[i] = cell;
+            }
+
+            for (int i = 1; i < w; i++)
+            {
+                cell.x = row1[i - 1].x - cw;
+                cell.y = row1[i - 1].y;
+                cell.z = row1[i - 1].z;
+
+                if (Closer(row1[i], cell))
+                    row1[i] = cell;
+            }
+
+            for (int i = w - 2; i >= 0; i--)
+            {
+                cell.x = row1[i + 1].x + cw;
+                cell.y = row1[i + 1].y;
+                cell.z = row1[i + 1].z;
+
+                if (Closer(row1[i], cell))
+                    row1[i] = cell;
+            }
+
+            row0 = row1;
+        }
+    }
+}
+
+void DOL::Danielsson(int w, int h, int d, cCellDelta3 deltas[], int cw)
+{
+    int sliceStride = w * h;
+
+    cCellDelta3* slice0 = deltas;
+    cCellDelta3 cell;
+
+    for (int k = 1; k < d; k++)
+    {
+        cCellDelta3* slice1 = slice0 + sliceStride;
+
+        for (int i = 0; i < sliceStride; i++)
+        {
+            cell.x = slice0[i].x;
+            cell.y = slice0[i].y;
+            cell.z = slice0[i].z - cw;
+
+            if (Closer(slice1[i], cell))
+                slice1[i] = cell;
+        }
+
+        DanielssonSlice(w, h, slice1, cw);
+
+        slice0 = slice1;
+    }
+
+    slice0 = deltas + sliceStride * (d - 1);
+
+    for (int k = d - 2; k >= 0; k--)
+    {
+        cCellDelta3* slice1 = slice0 - sliceStride;
+
+        for (int i = 0; i < sliceStride; i++)
+        {
+            cell.x = slice0[i].x;
+            cell.y = slice0[i].y;
+            cell.z = slice0[i].z + cw;
+
+            if (Closer(slice1[i], cell))
+                slice1[i] = cell;
+        }
+
+        DanielssonSlice(w, h, slice1, cw);
+
+        slice0 = slice1;
+    }
+}
+
+namespace
+{
+    void JumpFlood(int step, int w, int h, int d, const cCellDelta3 deltasIn[], cCellDelta3 deltasOut[], int cw)
+    {
+        const cCellDelta3* row    = deltasIn;
+        cCellDelta3*       rowOut = deltasOut;
+
+        int wh = w * h;
+
+        for (int k = 0; k < d; k++)
+        {
+            int kc0 = (k - step) >= 0 ? -step : 0;
+            int kc1 = (k + step) <  d ? +step : 0;
+
+            for (int j = 0; j < h; j++)
+            {
+                int jc0 = (j - step) >= 0 ? -step : 0;
+                int jc1 = (j + step) <  h ? +step : 0;
+
+                for (int i = 0; i < w; i++)
+                {
+                    cCellDelta3 minCell = row[i];
+
+                    int ic0 = (i - step) >= 0 ? -step : 0;
+                    int ic1 = (i + step) <  w ? +step : 0;
+
+                    for (int kc = kc0; kc <= kc1; kc += step)
+                    for (int jc = jc0; jc <= jc1; jc += step)
+                    for (int ic = ic0; ic <= ic1; ic += step)
+                    {
+                        cCellDelta3 cell = row[i + ic + jc * w + kc * wh];
+                        
+                        if (cell.x != kMaxDelta3)
+                        {
+                            cell.x += cw * ic;
+                            cell.y += cw * jc;
+                            cell.z += cw * kc;
+
+                            if (Closer(minCell, cell))
+                                minCell = cell;
+                        }
+                    }
+
+                    rowOut[i] = minCell;
+                }
+                
+                row    += w;
+                rowOut += w;
+            }
+        }
+    }
+}
+
+void DOL::JumpFlood(int w, int h, int d, cCellDelta3 deltas[], int cw)
+{
+    cCellDelta3* temp = new cCellDelta3[w * h * d];
+    cCellDelta3* d0 = deltas;
+    cCellDelta3* d1 = temp;
+
+    int wh = w >= h ? w : h;
+    int step = FloorPow2((wh >= d ? wh : d) - 1);
+    
+    for ( ; step > 0; step /= 2)
+    {
+        ::JumpFlood(step, w, h, d, d0, d1, cw);
+
+        cCellDelta3* dt = d0;
+        d0 = d1;
+        d1 = dt;
+    }
+
+    if (d0 != deltas)
+        ::JumpFlood(1, w, h, d, d0, deltas, cw);    // we could copy, but might as well do another round
+
+    delete[] temp;
+}
 
 
 // Brute force -- for checking only!
-void DOL::FindOptimalDeltas(int w, int h, int d, cCellDelta3 delta[])
+void DOL::BruteForce(int w, int h, int d, cCellDelta3 deltas[], int cw)
 {
     for (int k = 0; k < d; k++)
         for (int j = 0; j < h; j++)
             for (int i = 0; i < w; i++)
             {
-                cCellDelta3* cell = delta + k * w * h + j * w + i;
+                cCellDelta3* cell = deltas + k * w * h + j * w + i;
                 
-                if (cell->x != 0 || cell->y != 0 || cell->z != 0)
+                if (abs(cell->x) >= cw || abs(cell->y) >= cw || abs(cell->z) >= cw) // non-border cell
                     continue;
 
+                // For each occupied cell, iterate over all other cells and check for minimal distance
                 for (int z = 0; z < d; z++)
                     for (int y = 0; y < h; y++)
                         for (int x = 0; x < w; x++)
                         {
-                            cCellDelta3* cell = delta + z * w * h + y * w + x;
+                            cCellDelta3* cell = deltas + z * w * h + y * w + x;
                             
                             int d0 = (i - x) * (i - x) + (j - y) * (j - y) + (k - z) * (k - z); // d2 to i, j
                             int d1 = cell->x * cell->x + cell->y * cell->y + cell->z * cell->z; // current
@@ -1050,91 +2502,6 @@ void DOL::FindOptimalDeltas(int w, int h, int d, cCellDelta3 delta[])
                             }
                         }                
             }
-}
-
-namespace
-{
-    void FillBlock(int rs, int ss, int x0, int x1, int y0, int y1, int z0, int z1, float* dirW[8])
-    {
-        for (int z = z0; z <= z1; z++)
-            for (int y = y0; y <= y1; y++)
-                for (int x = x0; x <= x1; x++)
-                {
-                    int i = z * ss + y * rs + x;
-                    
-                    for (int k = 0; k < 8; k++)
-                        dirW[k][i] = 1.0f;
-                }
-    }
-
-    void FillMaskBlock(int rs, int ss, int x0, int x1, int y0, int y1, int z0, int z1, uint32_t mask[])
-    {
-        for (int z = z0; z <= z1; z++)
-        {
-            uint32_t* sliceMask = mask + z * ss;
-
-            FillMaskBlock(rs, x0, x1, y0, y1, sliceMask);
-        }
-    }
-    
-    void FillMaskBlockX(int rs, int ss, int x0, int x1, int y0, int y1, int z0, int z1, uint32_t mask[])
-    {
-        // e.g., 20 to 70:
-        int sx0 = (x0 +  0) / 32;   // 0
-        int sx1 = (x1 +  0) / 32;   // 2
-
-        uint32_t mask0 = LeftMask (x0 - sx0 * 32);
-        uint32_t mask1 = RightMask(x1 - sx1 * 32);
-
-        if (sx0 == sx1)
-        {
-            mask0 = mask0 & mask1;
-            mask1 = 0;
-        }
-
-        for (int z = z0; z <= z1; z++)
-            for (int y = y0; y <= y1; y++)
-            {
-                uint32_t* row = mask + z * ss + y * rs;
-
-                row[sx0] |= mask0;
-
-                for (int sx = sx0 + 1; sx < sx1; sx++)
-                    row[sx] = ~0;
-
-                row[sx1] |= mask1;
-            }
-    }
-}
-
-void DOL::CreateBitMaskFromBlock(int w, int h, int d, int variant, uint32_t mask[])
-{
-    int sw = MaskSize(w);
-    int rowStride   = sw;
-    int sliceStride = sw * h;
-    int volStride   = sw * h * d;
-
-    memset(mask, 0, sizeof(mask[0]) * volStride);
-    
-    int x0 = w / 4;
-    int x1 = x0 + w / 2;
-    int y0 = h / 3;
-    int y1 = y0 + h / 3;
-    int z0 = d / 3;
-    int z1 = z0 + d / 3;
-    
-    if (variant > 0) // -Z
-        FillMaskBlock(rowStride, sliceStride, x0, x1, y0, y1, z0, z0, mask);
-    if (variant > 1) // -X
-        FillMaskBlock(rowStride, sliceStride, x0, x0, y0, y1, z0, z1, mask);
-    if (variant > 2) // -Y
-        FillMaskBlock(rowStride, sliceStride, x0, x1, y0, y0, z0, z1, mask);
-    if (variant > 3) // +X
-        FillMaskBlock(rowStride, sliceStride, x1, x1, y0, y1, z0, z1, mask);
-    if (variant > 4) // +Y
-        FillMaskBlock(rowStride, sliceStride, x0, x1, y1, y1, z0, z1, mask);
-    if (variant > 5) // +Z
-        FillMaskBlock(rowStride, sliceStride, x0, x1, y0, y1, z1, z1, mask);
 }
 
 void DOL::InitDirWFromBitMask(int w, int h, int d, const uint32_t mask[], float dirW[])
@@ -1211,11 +2578,11 @@ namespace
         const int dy = 1 - 2 * sy;
         const int dz = 1 - 2 * sz;
             
-        const int ib = (w - 1) * sx;
+        const int ib =     sx * (w - 1);
         const int ie = w - sx * (w + 1);
 
-        const int wh = w * h;   // slice stride
-        const int whd = w * h * d;    // volume stride
+        const int wh  = w * h;      // slice stride
+        const int whd = w * h * d;  // volume stride
 
         const int rowStart   = sy * (wh - w);
         const int sliceStart = sz * (whd - wh);
@@ -1293,10 +2660,10 @@ namespace
         const int dy = 1 - 2 * sy;
         const int dz = 1 - 2 * sz;
             
-        const int ib = (w - 1) * sx;
+        const int ib =     sx * (w - 1);
         const int ie = w - sx * (w + 1);
 
-        const int wh = w * h;
+        const int wh  = w * h;
         const int whd = w * h * d;
 
         const int rowStart   = sy * (wh - w);

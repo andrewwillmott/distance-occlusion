@@ -12,8 +12,6 @@
 namespace MSL
 {
     // Mesh
-#ifndef CL_ASSERT
-//#ifndef VL_H
     struct Vec2f
     {
         float x;
@@ -26,7 +24,6 @@ namespace MSL
         float y;
         float z;
     };
-#endif
 
     struct Bounds3f
     {
@@ -34,31 +31,34 @@ namespace MSL
         Vec3f mMax;
     };
 
+    Bounds3f FindBounds();
+
     Bounds3f FindAOBounds(float eps, Bounds3f modelBounds);
     // Finds size of volume bbox given allowed error 'eps'. Derivation from Malmer et al.
     Bounds3f FindAOBounds(float eps, Bounds3f modelBounds, Vec3f minArea, Vec3f maxArea);
     // Variant of FindAOBounds that lets you supply your own axial projected area bounds
 
-    bool CreateDirW8FromTriangles
+    void CreateBitMaskFromTriangles
     (
         int             triCount,
+        const int       indices[],
         const Vec3f     vertices[],
         const Bounds3f& bbox,
-        int w, int h, int d, 
-        float           dirW8[]
+        int w, int h, int d,
+        uint32_t        mask[]
     );
-    ///< Initialises directional occlusion volumes from the given mesh. 
+    ///< Initialises occupancy mask from the given mesh. 'indices' may be null.
 
-    bool CreateDirW8FromTriangles
+    void CreateDirW8FromTriangles
     (
         int             triCount,
-        const int       vertexIndices[],
+        const int       indices[],
         const Vec3f     vertices[],
         const Bounds3f& bbox,
         int w, int h, int d, 
         float           dirW8[]
     );
-    ///< Initialises directional occlusion volumes from the given mesh. 
+    ///< Initialises directional occlusion volumes from the given mesh. 'indices' may be null.
 
     struct cMesh
     {
@@ -72,6 +72,8 @@ namespace MSL
     };
 
     bool ReadObjFile(FILE* file, cMesh* mesh);
+
+    Bounds3f FindBounds(const cMesh& mesh);
 }
 
 #endif
