@@ -53,9 +53,12 @@ MeshSupport.cpp.
 Building and Running
 --------------------
 
-To build the tool, run
+To build the tool, run 'make' or
 
     c++ DistanceOcclusionTool.cpp DistanceOcclusionLib.cpp -o distocc
+
+Or on Windows just include these files in your visual studio project. The code
+has been tested under clang, gcc, and Visual C.
 
 Then to see the tool options run
 
@@ -68,6 +71,7 @@ which should give you something like:
       -s: generate signed distance field in a single pass. Methods: as for -d but Chamfer/Felzenszwalb unsupported.
       -S: generate signed distance field via orthodox two distance field passes.
       -x: generate occlusion. Methods 0: standard, 1: no self-occlusion, 2: directional components only
+      -w <dx> <dy>: swept shadow
 
       -m <int>: select method variant for above
 
@@ -83,6 +87,7 @@ which should give you something like:
       -F <path>: use given obj file to define mask.
 
       -o <name>: set base name for output file(s)
+      -i <int> : select image output variant: 0, greyscale; 1, deltas; 2, r=exterior/g=interior
       -v       : log detailed output
       -c       : run checks on output
 
@@ -93,5 +98,3 @@ E.g.,
     ./distocc -s -f data/tiger.png    # Generate an SDF for the given image
     ./distocc -d -W 32 -F data/plant2.obj # Generate a 32^3 DF for the given 3D mesh
 
-On Windows just include these files in your visual studio project. The code has
-been tested under clang, gcc, and Visual C.

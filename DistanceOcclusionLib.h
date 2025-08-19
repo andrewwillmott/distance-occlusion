@@ -99,6 +99,10 @@ namespace DOL
 
     // --- Occlusion -----------------------------------------------------------
 
+    void InitOccFromBitMask(int w, int h, const uint32_t mask[], float occlusion[], float scale = 1.0f);
+    void ShadowSweep(float gx, float gy, int w, int h, const float* occlusion, float* shadow);
+    ///< Generate shadow (propagated straight-light occlusion)
+
     void InitDirWFromBitMask(int w, int h,        const uint32_t mask[], float dirW4[]);
     void InitDirWFromBitMask(int w, int h, int d, const uint32_t mask[], float dirW8[]);
     // Initialise 4-way or 8-way direction field from given bitmask.

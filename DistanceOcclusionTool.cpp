@@ -264,20 +264,20 @@ namespace
 
     bool PrintError(int w, int h, const cCellDelta2 deltas[], const cCellDelta2 refs[], FILE* s)
     {
-        float maxDist = 0.0f;
+        float maxErr = 0.0f;
 
         for (int i = 0; i < h; i++)
             for (int j = 0; j < w; j++, deltas++, refs++)
             {
-                float dist = Dist(*deltas) - Dist(*refs);
+                float err = fabsf(Dist(*deltas) - Dist(*refs));
 
-                if (maxDist < dist)
-                    maxDist = dist;
+                if (maxErr < err)
+                    maxErr = err;
             }
             
-        fprintf(s, "Max error: %g\n", maxDist);
+        fprintf(s, "Max error: %g\n", maxErr);
 
-        if (maxDist >= 1.0f)
+        if (maxErr >= 1.0f)
         {
             fprintf(s, "FAILED\n");
             return false;
@@ -288,20 +288,20 @@ namespace
 
     bool PrintError(int w, int h, const float distances[], const cCellDelta2 refs[], FILE* s)
     {
-        float maxDist = 0.0f;
+        float maxErr = 0.0f;
 
         for (int i = 0; i < h; i++)
-            for (int j = 0; j < w; j++, distances++, refs++)
-            {
-                float dist = *distances - Dist(*refs);
+        for (int j = 0; j < w; j++, distances++, refs++)
+        {
+            float err = fabsf(*distances - Dist(*refs));
 
-                if (maxDist < dist)
-                    maxDist = dist;
-            }
+            if (maxErr < err)
+                maxErr = err;
+        }
         
-        fprintf(s, "Max error: %g\n", maxDist);
+        fprintf(s, "Max error: %g\n", maxErr);
 
-        if (maxDist >= 1.0f)
+        if (maxErr >= 1.0f)
         {
             fprintf(s, "FAILED\n");
             return false;
@@ -343,21 +343,21 @@ namespace
 
     bool PrintError(int w, int h, int d, const cCellDelta3 deltas[], const cCellDelta3* refs, FILE* s)
     {
-        float maxDist = 0.0f;
+        float maxErr = 0.0f;
 
         for (int k = 0; k < d; k++)
         for (int i = 0; i < h; i++)
-            for (int j = 0; j < w; j++, deltas++, refs++)
-            {
-                float dist = Dist(*deltas) - Dist(*refs);
+        for (int j = 0; j < w; j++, deltas++, refs++)
+        {
+            float err = fabsf(Dist(*deltas) - Dist(*refs));
 
-                if (maxDist < dist)
-                    maxDist = dist;
-            }
+            if (maxErr < err)
+                maxErr = err;
+        }
         
-        fprintf(s, "Max error: %g\n", maxDist);
+        fprintf(s, "Max error: %g\n", maxErr);
 
-        if (maxDist >= 1.0f)
+        if (maxErr >= 1.0f)
         {
             fprintf(s, "FAILED\n");
             return false;
@@ -606,9 +606,9 @@ namespace
         char nameAndExt[128];
 
         if (index >= 0)
-            sprintf(nameAndExt, "%s-%s-%03d.png", name, type, index);
+            snprintf(nameAndExt, 128, "%s-%s-%03d.png", name, type, index);
         else
-            sprintf(nameAndExt, "%s-%s.png", name, type);
+            snprintf(nameAndExt, 128, "%s-%s.png", name, type);
 
         stbi_write_png(nameAndExt, w, h, 1, data, 0);
         printf("written %s\n", nameAndExt);
@@ -621,9 +621,9 @@ namespace
         char nameAndExt[128];
 
         if (index >= 0)
-            sprintf(nameAndExt, "%s-%s-%03d.png", name, type, index);
+            snprintf(nameAndExt, 128, "%s-%s-%03d.png", name, type, index);
         else
-            sprintf(nameAndExt, "%s-%s.png", name, type);
+            snprintf(nameAndExt, 128, "%s-%s.png", name, type);
 
         stbi_write_png(nameAndExt, w, h, 4, data, 0);
         printf("written %s\n", nameAndExt);
@@ -1023,11 +1023,12 @@ namespace
         kImageStandard,
         kImageDeltas,
         kImageRG,
+        kImageAngles,
     };
 
-    void WriteDistances(const char* name, int w, int h, float maxLen, const cCellDelta2 deltas0[], const cCellDelta2 deltas1[], int type)
+    void WriteDistances(const char* name, int w, int h, float maxLen, const cCellDelta2 deltas0[], const cCellDelta2 deltas1[], int imageType)
     {
-        if (type == kImageStandard)
+        if (imageType == kImageStandard)
         {
             uint8_t* dist8 = new uint8_t[w * h];
 
@@ -1043,21 +1044,37 @@ namespace
 
             for (int i = 0, n = w * h; i < n; i++)
             {
-                if (type == kImageDeltas)
+                if (imageType == kImageDeltas)
                 {
                     dist32[i][0] = EncodeU8Signed((deltas0[i].x + deltas1[i].x) / maxLen);
                     dist32[i][1] = EncodeU8Signed((deltas0[i].y + deltas1[i].y) / maxLen);
                 }
-                else
+                else if (imageType == kImageRG)
                 {
                     dist32[i][0] = EncodeU8(Dist(deltas0[i]) / maxLen);
                     dist32[i][1] = EncodeU8(Dist(deltas1[i]) / maxLen);
+                }
+                else if (imageType == kImageAngles)
+                {
+                    float d = (Dist(deltas0[i]) - Dist(deltas1[i]));
+
+                    dist32[i][0] = EncodeU8Signed((deltas0[i].x + deltas1[i].x) / d);
+                    dist32[i][1] = EncodeU8Signed((deltas0[i].y + deltas1[i].y) / d);
                 }
                 dist32[i][2] = 0;
                 dist32[i][3] = 255;
             }
 
-            WriteImage(name, type == kImageDeltas ? "sdf-delta" : "sdf-rg", w, h, dist32);
+            const char* suffix;
+            switch (imageType)
+            {
+            case kImageDeltas: suffix = "sdf-delta" ; break;
+            case kImageRG    : suffix = "sdf-rg"    ; break;
+            case kImageAngles: suffix = "sdf-angles"; break;
+            default          : suffix = "unknown"   ; break;
+            }
+
+            WriteImage(name, suffix, w, h, dist32);
             delete[] dist32;
         }
     }
@@ -1106,9 +1123,9 @@ namespace
         return true;
     }
 
-    void WriteDistances(const char* name, int w, int h, int d, float maxLen, cCellDelta3 deltas0[], cCellDelta3 deltas1[], int type)
+    void WriteDistances(const char* name, int w, int h, int d, float maxLen, cCellDelta3 deltas0[], cCellDelta3 deltas1[], int imageType)
     {
-        if (type == kImageStandard)
+        if (imageType == kImageStandard)
         {
             uint8_t* dist8 = new uint8_t[w * h];
 
@@ -1129,29 +1146,48 @@ namespace
         {
             uint8_t (*dist32)[4] = new uint8_t[w * h][4];
 
+            const char* suffix;
+            switch (imageType)
+            {
+            case kImageDeltas: suffix = "sdf-delta" ; break;
+            case kImageRG    : suffix = "sdf-rg"    ; break;
+            case kImageAngles: suffix = "sdf-angles"; break;
+            default          : suffix = "unknown"   ; break;
+            }
+
             for (int slice = 0; slice < d; slice++)
             {
                 cCellDelta3* sliceDeltas0 = deltas0 + w * h * slice;
                 cCellDelta3* sliceDeltas1 = deltas1 + w * h * slice;
 
-                for (int i = 0, n = w * h; i < n; i++)
-                {
-                    if (type == kImageDeltas)
+                if (imageType == kImageDeltas)
+                    for (int i = 0, n = w * h; i < n; i++)
                     {
                         dist32[i][0] = EncodeU8Signed((sliceDeltas0[i].x + sliceDeltas1[i].x) / maxLen);
                         dist32[i][1] = EncodeU8Signed((sliceDeltas0[i].y + sliceDeltas1[i].y) / maxLen);
                         dist32[i][2] = EncodeU8Signed((sliceDeltas0[i].z + sliceDeltas1[i].z) / maxLen);
+                        dist32[i][3] = 255;
                     }
-                    else
+                else if (imageType == kImageRG)
+                    for (int i = 0, n = w * h; i < n; i++)
                     {
                         dist32[i][0] = EncodeU8(Dist(sliceDeltas0[i]) / maxLen);
                         dist32[i][1] = EncodeU8(Dist(sliceDeltas1[i]) / maxLen);
                         dist32[i][2] = 0;
+                        dist32[i][3] = 255;
                     }
-                    dist32[i][3] = 255;
-                }
+                else if (imageType == kImageAngles)
+                    for (int i = 0, n = w * h; i < n; i++)
+                    {
+                        float d = (Dist(deltas0[i]) - Dist(deltas1[i]));
 
-                WriteImage(name, type == kImageDeltas ? "sdf-delta" : "sdf-rg", w, h, dist32, slice);
+                        dist32[i][0] = EncodeU8Signed((deltas0[i].x + deltas1[i].x) / d);
+                        dist32[i][1] = EncodeU8Signed((deltas0[i].y + deltas1[i].y) / d);
+                        dist32[i][2] = EncodeU8Signed((deltas0[i].z + deltas1[i].z) / d);
+                        dist32[i][3] = 255;
+                    }
+
+                WriteImage(name, suffix, w, h, dist32, slice);
             }
 
             delete[] dist32;
@@ -1201,9 +1237,9 @@ namespace
     // MARK: - Signed Distance generation using border technique
     ////////////////////////////////////////////////////////////////////////////
 
-    void WriteDistances(const char* name, int w, int h, float maxLen, const uint32_t mask[], const cCellDelta2 deltas[], int type)
+    void WriteDistances(const char* name, int w, int h, float maxLen, const uint32_t mask[], const cCellDelta2 deltas[], int imageType)
     {
-        if (type == kImageStandard)
+        if (imageType == kImageStandard)
         {
             uint8_t* dist8 = new uint8_t[w * h];
 
@@ -1242,8 +1278,7 @@ namespace
                 const cCellDelta2* deltasRow     = deltas + w * y;
                 uint8_t          (*dist32Row)[4] = dist32 + w * y;
 
-                if (type == kImageDeltas)
-                {
+                if (imageType == kImageDeltas)
                     for (int x = 0; x < w; x++)
                     {
                         dist32Row[x][0] = EncodeU8Signed(deltasRow[x].x / maxLen);
@@ -1251,8 +1286,7 @@ namespace
                         dist32Row[x][2] = 0;
                         dist32Row[x][3] = 255;
                     }
-                }
-                else
+                else if (imageType == kImageRG)
                     for (int j = 0; j < w; j += 32)
                     {
                         uint32_t m = *mask++;
@@ -1271,9 +1305,27 @@ namespace
                             m >>= 1;
                         }
                     }
+                else if (imageType == kImageAngles)
+                    for (int x = 0; x < w; x++)
+                    {
+                        float d = Dist(deltasRow[x]);
+                        dist32Row[x][0] = EncodeU8Signed(deltasRow[x].x / d);
+                        dist32Row[x][1] = EncodeU8Signed(deltasRow[x].y / d);
+                        dist32Row[x][2] = 0;
+                        dist32Row[x][3] = 255;
+                    }
             }
 
-            WriteImage(name, type == kImageDeltas ? "sdf-delta" : "sdf-rg", w, h, dist32);
+            const char* suffix;
+            switch (imageType)
+            {
+            case kImageDeltas: suffix = "sdf-delta" ; break;
+            case kImageRG    : suffix = "sdf-rg"    ; break;
+            case kImageAngles: suffix = "sdf-angles"; break;
+            default          : suffix = "unknown"   ; break;
+            }
+
+            WriteImage(name, suffix, w, h, dist32);
             delete[] dist32;
         }
     }
@@ -1312,9 +1364,9 @@ namespace
         return true;
     }
 
-    void WriteDistances(const char* name, int w, int h, int d, float maxLen, const uint32_t mask[], cCellDelta3 deltas[], int type)
+    void WriteDistances(const char* name, int w, int h, int d, float maxLen, const uint32_t mask[], cCellDelta3 deltas[], int imageType)
     {
-        if (type == kImageStandard)
+        if (imageType == kImageStandard)
         {
             // Write as images
             uint8_t* dist8 = new uint8_t[w * h];
@@ -1353,7 +1405,16 @@ namespace
         else
         {
             uint8_t (*dist32)[4] = new uint8_t[w * h][4];
-
+            
+            const char* suffix;
+            switch (imageType)
+            {
+            case kImageDeltas: suffix = "sdf-delta" ; break;
+            case kImageRG    : suffix = "sdf-rg"    ; break;
+            case kImageAngles: suffix = "sdf-angles"; break;
+            default          : suffix = "unknown"   ; break;
+            }
+            
             for (int slice = 0; slice < d; slice++)
             {
                 for (int y = 0; y < h; y++)
@@ -1361,8 +1422,7 @@ namespace
                     const cCellDelta3* deltasRow     = deltas + w * y;
                     uint8_t          (*dist32Row)[4] = dist32 + w * y;
 
-                    if (type == kImageDeltas)
-                    {
+                    if (imageType == kImageDeltas)
                         for (int x = 0; x < w; x++)
                         {
                             dist32Row[x][0] = EncodeU8Signed(deltasRow[x].x / maxLen);
@@ -1370,9 +1430,7 @@ namespace
                             dist32Row[x][2] = EncodeU8Signed(deltasRow[x].z / maxLen);
                             dist32Row[x][3] = 255;
                         }
-                    }
-                    else
-                    {
+                    else if (imageType == kImageRG)
                         for (int j = 0; j < w; j += 32)
                         {
                             uint32_t m = *mask++;
@@ -1391,10 +1449,18 @@ namespace
                                 m >>= 1;
                             }
                         }
-                    }
+                    else if (imageType == kImageAngles)
+                        for (int x = 0; x < w; x++)
+                        {
+                            float d = Dist(deltasRow[x]);
+                            dist32Row[x][0] = EncodeU8Signed(deltasRow[x].x / d);
+                            dist32Row[x][1] = EncodeU8Signed(deltasRow[x].y / d);
+                            dist32Row[x][2] = EncodeU8Signed(deltasRow[x].z / d);
+                            dist32Row[x][3] = 255;
+                        }
                 }
 
-                WriteImage(name, type == kImageDeltas ? "sdf-delta" : "sdf-rg", w, h, dist32, slice);
+                WriteImage(name, suffix, w, h, dist32, slice);
                 deltas += w * h;
             }
 
@@ -1643,6 +1709,7 @@ int main(int argc, const char* argv[])
             "  -s: generate signed distance field in a single pass. Methods: as for -d but Chamfer/Felzenszwalb unsupported.\n"
             "  -S: generate signed distance field via orthodox two distance field passes.\n"
             "  -x: generate occlusion. Methods 0: standard, 1: no self-occlusion, 2: directional components only\n"
+            "  -w <dx> <dy>: swept shadow\n"
             "\n"
             "  -m <int>: select method variant for above\n"
             "\n"
@@ -1662,6 +1729,7 @@ int main(int argc, const char* argv[])
         #endif
             "\n"
             "  -o <name>: set base name for output file(s)\n"
+            "  -i <int> : select image output variant: 0, greyscale; 1, deltas; 2, r=exterior/g=interior\n"
         #if USE_STB || USE_MESH
             "  -v       : log detailed output\n"
         #endif
@@ -1680,6 +1748,7 @@ int main(int argc, const char* argv[])
         kSignedDistance,
         kSignedDistanceBorder,
         kOcclusion,
+        kSweptShadow,
         kMaxAlgorithms
     };
 
@@ -1693,6 +1762,9 @@ int main(int argc, const char* argv[])
     int pointsSeed = 12345;
     int numPoints = 0;
     int numSides = 0;
+
+    float dir[3] = { 1.0f, 1.0f, 1.0f };
+    float strength = 1.0f;
 
     char outName[1024] = "out";
     bool haveName = false;
@@ -1724,6 +1796,17 @@ int main(int argc, const char* argv[])
             break;
         case 'x':
             algorithm = kOcclusion;
+            break;
+        case 'h':
+            algorithm = kSweptShadow;
+            if (NextIsArg(argc, argv))
+                strength = atof(Next(argc, argv));
+            if (NextIsArg(argc, argv))
+                dir[0] = atof(Next(argc, argv));
+            if (NextIsArg(argc, argv))
+                dir[1] = atof(Next(argc, argv));
+            if (NextIsArg(argc, argv))
+                dir[2] = atof(Next(argc, argv));
             break;
         case 'v':
             out = stdout;
@@ -1928,6 +2011,27 @@ int main(int argc, const char* argv[])
             GenerateOcclusion(outName, dim[0], dim[1], dirW, method, out);
         else
             GenerateOcclusion(outName, dim[0], dim[1], dim[2], dirW, method, out);
+        break;
+
+    case kSweptShadow:
+        if (dim[2] == 0)
+        {
+            int n = dim[0] * dim[1];
+            float* occlusion = new float[n];
+            InitOccFromBitMask(dim[0], dim[1], mask, occlusion, 8 * strength / dim[1]);
+
+            float* shadow = new float[n];
+            ShadowSweep(dir[0], dir[1], dim[0], dim[1], occlusion, shadow);
+            uint8_t* occ8 = new uint8_t[n];
+
+            for (int i = 0; i < n; i++)
+                occ8[i] = EncodeU8(1.0f - shadow[i]);
+
+            WriteImage(outName, "shadow", dim[0], dim[1], occ8);
+            delete[] occ8;
+            delete[] occlusion;
+            delete[] shadow;
+        }
         break;
 
     default:

@@ -7,6 +7,7 @@
 
 #include <math.h>
 #include <string.h>
+#include <stdio.h>
 
 using namespace DOL;
 
@@ -179,12 +180,12 @@ void DOL::BitMaskAddBlock(int w, int h, int sides, uint32_t mask[])
 
 namespace
 {
-    template<class T> void InitDistancesFromBitMask(int w, int h, const uint32_t mask[], T distances[], T maxD)
+    template<class T> void InitFromBitMask(int w, int h, const uint32_t mask[], T data[], T minD, T maxD)
     {
         // mask is expected to have rows padded to whole numbers of uint32_ts
         int s = w * h;
         for (int i = 0; i < s; i++)
-            distances[i] = maxD;
+            data[i] = maxD;
 
         int maskStride = MaskSize(w);
         
@@ -197,10 +198,10 @@ namespace
                 if (m == 0)
                     continue;
                 
-                T* block = distances + y * w + 32 * j;
+                T* block = data + y * w + 32 * j;
                 
                 ITER_SET_BITS_BEGIN(m)
-                    block[i] = 0;
+                    block[i] = minD;
                 ITER_SET_BITS_END
             }
         }
@@ -209,15 +210,15 @@ namespace
 
 void DOL::InitDistancesFromBitMask(int w, int h, const uint32_t mask[], int16_t distances[], int16_t maxD)
 {
-    return ::InitDistancesFromBitMask<int16_t>(w, h, mask, distances, maxD);
+    return ::InitFromBitMask<int16_t>(w, h, mask, distances, 0, maxD);
 }
 void DOL::InitDistancesFromBitMask(int w, int h, const uint32_t mask[], int32_t distances[], int32_t maxD)
 {
-    return ::InitDistancesFromBitMask<int32_t>(w, h, mask, distances, maxD);
+    return ::InitFromBitMask<int32_t>(w, h, mask, distances, 0, maxD);
 }
 void DOL::InitDistancesFromBitMask(int w, int h, const uint32_t mask[], float distances[], float maxD)
 {
-    return ::InitDistancesFromBitMask<float>(w, h, mask, distances, maxD);
+    return ::InitFromBitMask<float>(w, h, mask, distances, 0.0f, maxD);
 }
 
 void DOL::InitDeltasFromBitMask(int w, int h, const uint32_t mask[], cCellDelta2 deltas[], bool invert)
@@ -780,11 +781,12 @@ namespace
 {
     void JumpFlood(int step, int w, int h, cCellDelta2 deltasIn[], cCellDelta2 deltasOut[], int cw)
     {
-        const cCellDelta2* row    = deltasIn;
-        cCellDelta2*       rowOut = deltasOut;
-
+        #pragma omp parallel for
         for (int j = 0; j < h; j++)
         {
+            const cCellDelta2* row    = deltasIn  + j * w;
+            cCellDelta2*       rowOut = deltasOut + j * w;
+
             for (int i = 0; i < w; i++)
             {
                 cCellDelta2 minCell = row[i]; 
@@ -867,9 +869,6 @@ namespace
 
                 rowOut[i] = minCell; 
             }
-            
-            row    += w;
-            rowOut += w;
         }
     }
 
@@ -1024,8 +1023,9 @@ namespace
     // on the cell, which limits accuracy for higher-than-cell-resolution
     // boundaries. Poor locality, is noticeably slower than the other O(n)
     // algorithms unless everything is in cache.
-    void Felzenszwalb(float f[], int n, int v[/* n */], float z[/*n + 1*/])    // 1D version
+    void Felzenszwalb(int n, int m, const float f2[/* i . m */], float d[], int v[/* n */], float z[/* n + 1 */])
     {
+        // See algorithm 1., same variable names are used.
         int k = 0;
 
         v[0] = 0;
@@ -1034,27 +1034,30 @@ namespace
 
         for (int q = 1; q < n; q++)
         {
-            float s  = ((f[q] + (q * q)) - (f[v[k]] + (v[k] * v[k]))) / (2 * q - 2 * v[k]);
+            float fqt = f2[m * q] + q * q;
+            float fvt = f2[m * v[k]] + (v[k] * v[k]);
+            float s = (fqt - fvt) / (2 * (q - v[k]));
 
             while (s <= z[k])
             {
                 k--;
-                s  = ((f[q] + (q * q)) - (f[v[k]] + (v[k] * v[k]))) / (2 * q - 2 * v[k]);
+                fvt = f2[m * v[k]] + (v[k] * v[k]);
+                s = (fqt - fvt) / (2 * (q - v[k]));
             }
 
             k++;
             v[k] = q;
             z[k] = s;
-            z[k+1] = +FLT_MAX;
+            z[k + 1] = +FLT_MAX;
         }
-        
+
         k = 0;
         for (int q = 0; q < n; q++)
         {
             while (z[k + 1] < q)
                 k++;
 
-            f[q] = (q - v[k]) * (q - v[k]) + f[v[k]];
+            d[q] = (q - v[k]) * (q - v[k]) + f2[m * v[k]];
         }
     }
 }
@@ -1062,32 +1065,24 @@ namespace
 void DOL::Felzenszwalb(int w, int h, float distances[])
 {
     int whMax = w >= h ? w : h;
-    float* f = new float[whMax];
-    int*   v = new int[whMax];
-    float* z = new float[whMax + 1];
+    float* td = new float[w * h];
+    int*   v  = new int  [whMax];
+    float* z  = new float[whMax + 1];
 
     // Transform along columns
+    #pragma omp parallel for
     for (int x = 0; x < w; x++)
-    {
-        for (int y = 0; y < h; y++)
-            f[y] = distances[x + y * w];
+        ::Felzenszwalb(h, w, distances + x, td + x * h, v, z);
 
-        ::Felzenszwalb(f, h, v, z);
-
-        for (int y = 0; y < h; y++)
-            distances[x + y * w] = f[y];
-    }
-    
     // transform along rows
+    #pragma omp parallel for
     for (int y = 0; y < h; y++)
-        ::Felzenszwalb(distances + y * w, w, v, z);
-    
-    delete[] z;
+        ::Felzenszwalb(w, h, td + y, distances + y * w, v, z);
+
+    delete[] td;
     delete[] v;
-    delete[] f;
+    delete[] z;
 }
-
-
 
 // Brute force -- for checking only!
 void DOL::BruteForce(int w, int h, cCellDelta2 deltas[], int cw)
@@ -1159,9 +1154,9 @@ namespace
         // Simplest is to assume a and b cover half the quadrant each.
         // Need a=b=1 -> 1 to avoid light leaking.
         
-    #if 0
-        return 0.5f * (a + b) - 0.1f * a * b;
-    #elif 0
+    #if 1
+        return 0.75f * ((a + b) - 1.0f * a * b);
+    #elif 1
         return 0.5f * (a + b);
     #else
         // if either leads to complete coverage, a + b - ab
@@ -2402,13 +2397,14 @@ namespace
 {
     void JumpFlood(int step, int w, int h, int d, const cCellDelta3 deltasIn[], cCellDelta3 deltasOut[], int cw)
     {
-        const cCellDelta3* row    = deltasIn;
-        cCellDelta3*       rowOut = deltasOut;
-
         int wh = w * h;
 
+        #pragma omp parallel for
         for (int k = 0; k < d; k++)
         {
+            const cCellDelta3* row    = deltasIn  + k * wh;
+            cCellDelta3*       rowOut = deltasOut + k * wh;
+
             int kc0 = (k - step) >= 0 ? -step : 0;
             int kc1 = (k + step) <  d ? +step : 0;
 
@@ -2770,4 +2766,113 @@ void DOL::OcclusionSweep(int w, int h, int d, const float* occDirW, float* dirW)
 
         ::OcclusionSweep(w, h, d, sx, sy, sz, occDirW + sweep * whd, dirW + sweep * whd);
     }
+}
+
+namespace
+{
+    void ShadowSweepRows(float g, int sx, int sy, int w, int h, const float* occlusion, float* shadow)
+    {
+        const float g1 = g;
+        const float g0 = 1.0f - g1;
+
+        const int dx = 1 - 2 * sx;
+        const int dy = 1 - 2 * sy;
+
+        const int di = dx;
+        const int ib = sx * (w - 1);
+        const int ie = ib + di * w;
+
+        const int dj = dy * w;
+        const int jb = sy * (h - 1) * w;
+
+        // Propagation: d' = m + d * (1 - m), where m = lerp of previous row cells
+
+        const float* iRow0 = occlusion + jb;
+        float*       oRow0 = shadow    + jb;
+        
+        // do first row -- only depends on itself
+        for (int i = ib; i != ie; i += di)
+            oRow0[i] = iRow0[i];
+
+        for (int j = 1; j < h; j++)
+        {
+            const float* iRow1 = iRow0 + dj;
+            float*       oRow1 = oRow0 + dj;
+
+            // do first cell, only depends on prev row above
+            float m = oRow0[ib] * g0;
+            oRow1[ib] = m + (1.0f - m) * iRow1[ib];
+
+            // rest of row -- prev cell above and above left
+            for (int i = ib + di; i != ie; i += di)
+            {
+                float m = oRow0[i - di] * g1 + oRow0[i] * g0;
+                oRow1[i] = m + (1.0f - m) * iRow1[i];
+            }
+
+            iRow0 = iRow1;
+            oRow0 = oRow1;
+        }
+    }
+
+    void ShadowSweepCols(float g, int sx, int sy, int w, int h, const float* occlusion, float* shadow)
+    {
+        float g1 = g;
+        float g0 = 1.0f - g1;
+
+        const int dx = 1 - 2 * sx;
+        const int dy = 1 - 2 * sy;
+
+        const int wh = w * h;   // slice stride
+
+        const int ib = (wh - w) * sy;
+        const int ie = ib + wh * dy;
+        const int di = dy * w;
+
+        const int jb = (w - 1) * sx;
+        const int dj = dx;
+
+        const float* iRow0 = occlusion + jb;
+        float*       oRow0 = shadow    + jb;
+
+        // do first col -- only depends on itself
+        for (int i = ib; i != ie; i += di)
+            oRow0[i] = iRow0[i];
+
+        for (int j = 1; j < w; j++)
+        {
+            const float* iRow1 = iRow0 + dj;
+            float*       oRow1 = oRow0 + dj;
+
+            // do first cell, only depends on prev col above
+            float m = oRow0[ib] * g0;
+            oRow1[ib] = m + (1.0f - m) * iRow1[ib];
+
+            // rest of col -- prev cell above and above left/right
+            for (int i = ib + di; i != ie; i += di)
+            {
+                float m = oRow0[i - di] * g1 + oRow0[i] * g0;
+                oRow1[i] = m + (1.0f - m) * iRow1[i];
+            }
+
+            iRow0 = iRow1;
+            oRow0 = oRow1;
+        }
+    }
+}
+
+void DOL::InitOccFromBitMask(int w, int h, const uint32_t mask[], float occlusion[], float scale)
+{
+    InitFromBitMask<float>(w, h, mask, occlusion, scale, 0.0f);
+}
+
+void DOL::ShadowSweep(float gx, float gy, int w, int h, const float* occlusion, float* shadow)
+{
+    const int sx = gx > 0.0f ? 0 : 1;
+    const int sy = gy > 0.0f ? 0 : 1;
+
+    if (fabsf(gx) <= fabsf(gy))
+        ShadowSweepRows(fabsf(gx / gy), sx, sy, w, h, occlusion, shadow);
+    else
+        ShadowSweepCols(fabsf(gy / gx), sx, sy, w, h, occlusion, shadow);
 }
