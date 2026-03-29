@@ -1,5 +1,4 @@
-Distance/Occlusion Library + Tool
-===============
+# Distance/Occlusion Library + Tool
 
 <a href="data/tiger.png"            ><img src="data/tiger.png"             width="192"/></a>
 <a href="images/tiger-sdf.png"      ><img src="images/tiger-sdf.png"       width="192"/></a>
@@ -11,11 +10,10 @@ Distance/Occlusion Library + Tool
 <a href="images/kiwi-sdf-rg.png"    ><img src="images/kiwi-sdf-rg.png"     width="192"/></a>
 <a href="images/kiwi-sdf-delta.png" ><img src="images/kiwi-sdf-delta.png"  width="192"/></a>
 
-From left to right: original, signed distance with zero at 0.5,
-red/green SDF, delta vectors to closest boundary point.
+From left to right: original, signed distance with zero at 0.5, red/green SDF,
+delta vectors to closest boundary point.
 
-Intro
------
+## Intro
 
 The DistanceOcclusionLib.* files here implement a number of algorithms for
 
@@ -24,13 +22,13 @@ The DistanceOcclusionLib.* files here implement a number of algorithms for
 * Scalar and directional occlusion generation
 
 for both 2d (images) and 3d (volumes). Bitmask inputs are supported to keep
-memory overhead down, which is particularly important for volumes.
+memory overhead down, particularly important for volumes.
 
-The included tool, distocc, which uses this lib, will process 2D images or 3D
-.obj files, and can output the results in a number of different formats. By
-default the tool uses the 'Danielsson' algorithm, and signed border
-initialisation, in order to generate accurate results as quickly as possible,
-but other algorithms can be be selected via -m (see below). These include:
+The included demo tool, `distocc`, will process 2D images or 3D .obj files, and
+can output the results in a number of different formats. By default the tool
+uses the 'Danielsson' algorithm, and signed border initialisation, in order to
+generate accurate results as quickly as possible, but other algorithms can be be
+selected via -m (see below). These include:
 
     FastSweep        O(n), most accurate delta technique
     Danielsson       O(n), ~30% faster than FastSweep, decent accuracy
@@ -41,24 +39,38 @@ but other algorithms can be be selected via -m (see below). These include:
 
 The first four algorithms provide deltas from cell to closest point, which can
 be used to evaluate distance, but also to answer nearest-point queries, or
-generate Voronoi diagrams. The last two are strictly distance-only. Finally,
-signed distances can be optionally generated via the more classic two-pass
+generate Voronoi diagrams. The last two are strictly distance-only. Finally, as
+a comparison signed distances can also be generated via the classic two-pass
 interior/exterior algorithm, but this is twice as slow and uses twice as much
 memory as the default.
 
-A reasonably efficient mesh voxeliser is included in the support file
-MeshSupport.cpp.
+## Components
+
+The library comes in three parts:
+
+- `MaskUtilities.hpp/cpp`. Contains utilities for operating on 1-bit images and
+  volumes, as well as a reasonably efficient 2D/3D triangle -> bitmask
+  rasteriser which may be useful for other purposes.
+
+- `DistanceFields.hpp/cpp`. Contains distance and signed-distance generation
+  techniques for mask images/volumes. There is some naive OpenMP support for the
+  JumpFlood and Felzenszwalb algorithms if you compile with -fopenmp.
+
+- `OcclusionFields.hpp/cpp`. Contains some fast occlusion generation techniques
+  for masks, including (coarse) directional occlusion. Also contains a simple
+  cone cast helper, which can be useful for CPU-side visiblity checks.
+
+There is also `VLMini.h`, a small 2D/3D vector library, which you can replace
+with your own, image read/write support in `DOFImage.*`, and basic .obj file
+read support in `MeshSupport.*`.
 
 
-Building and Running
---------------------
+## Building and Running
 
-To build the tool, run 'make' or
-
-    c++ DistanceOcclusionTool.cpp DistanceOcclusionLib.cpp -o distocc
-
-Or on Windows just include these files in your visual studio project. The code
-has been tested under clang, gcc, and Visual C.
+To build the library and tool, run 'make', or on Windows include the files in
+your visual studio project. The code has been tested under clang, gcc, and
+Visual C. C++11 is required. (Not for anything fancier than initialisers
+though.)
 
 Then to see the tool options run
 
@@ -91,10 +103,14 @@ which should give you something like:
       -v       : log detailed output
       -c       : run checks on output
 
-E.g.,
 
-    ./distocc -d -p 100               # Generate a DF for 100 random points
-    ./distocc -d -W 16 -b 6           # Generate a DF for a test box within a 16^3 volume
-    ./distocc -s -f data/tiger.png    # Generate an SDF for the given image
-    ./distocc -d -W 32 -F data/plant2.obj # Generate a 32^3 DF for the given 3D mesh
+## Examples
+
+Try the following:
+
+    ./distocc -d -p 100                         # Generate a DF for 100 random points
+    ./distocc -d -W 16 -b 6                     # Generate a DF for a test box within a 16^3 volume
+    ./distocc -s -f data/tiger.png              # Generate an SDF for the given image
+    ./distocc -s -f data/tiger.png -p 20 -i 1   # Generate an SDF for the given image, plus 20 random points, and save as deltas to surface
+    ./distocc -d -W 64 -F data/plant2.obj       # Generate a 64^3 distance field for the given 3D mesh
 

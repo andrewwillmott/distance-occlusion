@@ -1,0 +1,7 @@
+distocc
+*.o
+*.a
+*.dSYM
+.DS_Store
+*.png
+*.mp4
