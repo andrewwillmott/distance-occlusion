@@ -6,6 +6,8 @@
 // Andrew Willmott
 //
 
+#define _CRT_SECURE_NO_WARNINGS  // for stb_image
+
 #include "DOFImage.hpp"
 
 #include "DistanceFields.hpp"
