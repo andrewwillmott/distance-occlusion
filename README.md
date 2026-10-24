@@ -15,7 +15,7 @@ delta vectors to closest boundary point.
 
 ## Intro
 
-The DistanceOcclusionLib.* files here implement a number of algorithms for
+The `DistanceFields.*` and `OcclusionFields.*` files here implement a number of algorithms for
 
 * Distance field generation
 * Signed distance field generation
@@ -60,7 +60,7 @@ The library comes in three parts:
   for masks, including (coarse) directional occlusion. Also contains a simple
   cone cast helper, which can be useful for CPU-side visiblity checks.
 
-There is also `VLMini.h`, a small 2D/3D vector library, which you can replace
+There is also `VLMini.hpp`, a small 2D/3D vector library, which you can replace
 with your own, image read/write support in `DOFImage.*`, and basic .obj file
 read support in `MeshSupport.*`.
 
